@@ -8,6 +8,15 @@ Direct tool call outputs do not enter the LLM context; only the script's output 
 
 Scripts use `tools`, `ALL_TOOLS`, `text`, `image`, `exit`, `store`, and `load`, and may start with a `# @options:` line.
 
+## Repo Structure
+
+```text
+packages/
+├── codemode-py/          # Runtime package: source, tests, and build configuration
+└── extensions/
+    └── codemode/        # Pi coding-agent extension
+```
+
 ## Architecture
 
 This extension follows most of the overall architecture of the bundled pi codemode extension as closely as 
