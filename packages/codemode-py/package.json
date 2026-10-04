@@ -20,21 +20,18 @@
 			"source": "./src/source.ts",
 			"types": "./dist/source.d.ts",
 			"import": "./dist/source.js"
-		},
-		"./worker": {
-			"source": "./src/runtime/worker.ts",
-			"types": "./dist/runtime/worker.d.ts",
-			"import": "./dist/runtime/worker.js"
 		}
 	},
 	"files": [
 		"dist",
-		"src"
+		"src",
+		"scripts"
 	],
 	"scripts": {
 		"clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
-		"build": "tsc -p tsconfig.build.json",
-		"test": "vitest --run",
+		"generate": "node scripts/embed-python.mjs",
+		"build": "npm run generate && tsc -p tsconfig.build.json",
+		"test": "node scripts/embed-python.mjs --check && vitest --run",
 		"prepack": "npm run clean && npm run build"
 	},
 	"keywords": [
@@ -46,9 +43,6 @@
 	"license": "MIT",
 	"engines": {
 		"node": ">=22.19.0"
-	},
-	"dependencies": {
-		"quickjs-wasi": "3.6.2"
 	},
 	"devDependencies": {
 		"@types/node": "22.19.19",

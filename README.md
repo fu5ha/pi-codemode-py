@@ -93,8 +93,8 @@ if (result.ok) {
 `store(key, None)` deletes, and `load(key)` returning `None` means the key did not exist. There is
 no way to store `None` explicitly.
 
-Measures serialized pickle bytes before sending back to host, with maximum store sizes of 1 MiB per value and
-100 MiB total.
+Measures serialized pickle bytes before base64 transport, with maximum store sizes of 256 KiB per value and
+2 MiB total.
 
 ## Source format
 

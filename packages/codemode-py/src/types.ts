@@ -1,9 +1,7 @@
-import type { CodemodeWasmModule } from "./wasm.ts";
-
 export interface CodemodeToolContext {
 	/**
 	 * Aborted when the script finishes (including unawaited calls), the
-	 * execution times out, the caller aborts, or the sandbox is closed.
+	 * execution times out, the caller aborts, or the execution environment is closed.
 	 */
 	signal: AbortSignal;
 }
@@ -41,7 +39,7 @@ export interface CodemodeTool {
 }
 
 /**
- * One item of the script's output, in the order the script produced it: `text()` and `console.*`
+ * One item of the script's output, in the order the script produced it: `text()` and Python streams
  * produce text items, `image()` image items. `data` is base64.
  */
 export type CodemodeOutputItem = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -59,10 +57,10 @@ export type CodemodeErrorKind =
 	| "script"
 	/** The overall deadline expired. The worker was terminated. */
 	| "timeout"
-	/** The caller's signal fired or the sandbox was closed. The worker was terminated. */
+	/** The caller's signal fired or the environment was closed. Python was terminated. */
 	| "aborted"
-	/** The worker or VM failed outside the script's control (for example a wasm trap or a missing worker file). */
-	| "sandbox";
+	/** Python startup, lifecycle setup, or bridge transport failed outside the script. */
+	| "exec";
 
 export interface CodemodeError {
 	kind: CodemodeErrorKind;
@@ -73,12 +71,12 @@ export interface CodemodeError {
 
 /** Keys the script changed with `store()`. Only successful executions report writes. */
 export interface CodemodeStoreWrites {
-	set: Record<string, unknown>;
-	/** Keys stored as `undefined`. */
+	set: Record<string, Uint8Array>;
+	/** Keys stored as Python `None`. */
 	delete: string[];
 }
 
-/** `output` is kept for failed executions too, up to the failure. `exit()` completes with `value: undefined`. */
+/** Output is kept on failure. Top-level None/implicit return/exit() yield {}. */
 export type CodemodeResult =
 	| {
 			ok: true;
@@ -89,13 +87,14 @@ export type CodemodeResult =
 	  }
 	| { ok: false; error: CodemodeError; output: CodemodeOutputItem[]; calls: CodemodeCall[] };
 
-export interface CodemodeSandboxOptions {
+export interface CodemodeExecutionEnvOptions {
 	tools?: CodemodeTool[];
 	/**
 	 * Functions exposed as top-level identifiers instead of on `tools`, for host helpers such as
 	 * attaching an image to the result. They behave like tools (JSON round trip, promise result)
 	 * but are not recorded in `result.calls`. Names must be identifiers and may not shadow the
-	 * built-in globals (`tools`, `ALL_TOOLS`, `console`, `text`, `image`, `exit`, `store`, `load`).
+	 * built-in globals (`tools`, `ALL_TOOLS`, `text`, `exit`, `store`, `load`).
+	 * A host `image` global can replace the built-in image helper.
 	 */
 	globals?: CodemodeTool[];
 	/**
@@ -104,33 +103,18 @@ export interface CodemodeSandboxOptions {
 	 * Default: 300000.
 	 */
 	timeoutMs?: number;
-	/**
-	 * Maximum memory the QuickJS VM may allocate. Allocations beyond it fail inside the script as
-	 * `InternalError: out of memory`. Default: no limit beyond wasm32's 4 GiB address space.
-	 */
-	memoryLimitBytes?: number;
-	/**
-	 * Compiled `quickjs-wasi/quickjs.wasm`, usually from {@link loadQuickJSWasm}. Default:
-	 * `loadQuickJSWasm()`, the file in the installed `quickjs-wasi` package. Pass it when that file
-	 * is not on disk, for example in a Bun compiled executable.
-	 */
-	wasm?: CodemodeWasmModule | Promise<CodemodeWasmModule>;
-	/**
-	 * Worker entry that imports `@earendil-works/pi-codemode/worker`. Default: this package's own
-	 * worker file. Pass it when this package is bundled, since the default is resolved relative to
-	 * the module that creates the sandbox. Bun compiled executables require the relative string
-	 * specifier of an embedded build entrypoint; other hosts usually use a URL.
-	 */
-	workerUrl?: string | URL;
 }
+
+/** @deprecated Use CodemodeExecutionEnvOptions; execution is not sandboxed. */
+export type CodemodeSandboxOptions = CodemodeExecutionEnvOptions;
 
 export interface CodemodeExecuteOptions {
 	signal?: AbortSignal;
 	/** Overrides the sandbox default for this execution. */
 	timeoutMs?: number;
 	/**
-	 * Values the script reads with `load(key)`. Must be JSON-serializable. The script's own
+	 * Opaque serialized pickle bytes the script reads with `load(key)`. The script's own
 	 * `store()` calls come back as `result.storeWrites`; persisting them is up to the caller.
 	 */
-	store?: Readonly<Record<string, unknown>>;
+	store?: Readonly<Record<string, Uint8Array>>;
 }

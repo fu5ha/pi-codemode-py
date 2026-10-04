@@ -1,63 +1,52 @@
-import { Worker } from "node:worker_threads";
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { createServer, type Server, type Socket } from "node:net";
 import { toCodemodeIdentifier } from "../identifier.ts";
 import type {
-	CodemodeCall,
-	CodemodeCallStatus,
-	CodemodeError,
-	CodemodeExecuteOptions,
-	CodemodeOutputItem,
-	CodemodeResult,
-	CodemodeSandboxOptions,
-	CodemodeStoreWrites,
-	CodemodeTool,
+	CodemodeCall, CodemodeError, CodemodeExecuteOptions, CodemodeOutputItem, CodemodeResult,
+	CodemodeExecutionEnvOptions, CodemodeStoreWrites, CodemodeTool,
 } from "../types.ts";
-import { type CodemodeWasmModule, loadQuickJSWasm } from "../wasm.ts";
-import {
-	type HostToWorkerMessage,
-	isWorkerToHostMessage,
-	type WorkerData,
-	type WorkerToHostMessage,
-} from "./protocol.ts";
+import { MAX_BRIDGE_BYTES, MAX_OUTPUT_CHARS, MAX_OUTPUT_ITEMS, MAX_STORE_TOTAL_BYTES, MAX_STORE_VALUE_BYTES } from "./limits.ts";
+import type { HostToPythonMessage, PythonToHostMessage } from "./protocol.ts";
+import { BOOTSTRAP_SOURCE, RUNNER_SOURCE } from "./python-source.ts";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
-const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-const RESERVED_GLOBALS: ReadonlySet<string> = new Set([
-	"tools",
-	"ALL_TOOLS",
-	"console",
-	"text",
-	"image",
-	"exit",
-	"globalThis",
-	"store",
-	"load",
-]);
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_GLOBALS = new Set(["tools", "ALL_TOOLS", "text", "exit", "store", "load", "__builtins__", "__codemode_main__"]);
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function serializeStore(store: Readonly<Record<string, unknown>> | undefined): Record<string, string> {
-	const serialized: Record<string, string> = {};
+function serializeStore(store: CodemodeExecuteOptions["store"]): Record<string, string> {
+	const serialized: Record<string, string> = Object.create(null);
+	let total = 0;
 	for (const [key, value] of Object.entries(store ?? {})) {
-		const json = JSON.stringify(value);
-		if (json !== undefined) serialized[key] = json;
+		if (!(value instanceof Uint8Array)) throw new TypeError(`Store value "${key}" must be Uint8Array pickle bytes`);
+		if (value.byteLength > MAX_STORE_VALUE_BYTES) throw new RangeError(`Store value "${key}" exceeds ${MAX_STORE_VALUE_BYTES} pickle bytes`);
+		total += value.byteLength;
+		if (total > MAX_STORE_TOTAL_BYTES) throw new RangeError(`Store exceeds ${MAX_STORE_TOTAL_BYTES} pickle bytes`);
+		serialized[key] = Buffer.from(value).toString("base64");
 	}
 	return serialized;
 }
 
-function parseStoreWrites(json: string): CodemodeStoreWrites {
-	const writes: CodemodeStoreWrites = { set: {}, delete: [] };
-	for (const [key, value] of JSON.parse(json) as [string, string?][]) {
-		if (value === undefined) writes.delete.push(key);
-		else writes.set[key] = JSON.parse(value);
+function parseStoreWrites(values: Record<string, string | null>): CodemodeStoreWrites {
+	const writes: CodemodeStoreWrites = { set: Object.create(null), delete: [] };
+	let total = 0;
+	for (const [key, value] of Object.entries(values)) {
+		if (value === null) {
+			writes.delete.push(key);
+		} else {
+			if (typeof value !== "string") throw new Error("Invalid pickle store write");
+			const bytes = Buffer.from(value, "base64");
+			if (bytes.toString("base64") !== value || bytes.byteLength > MAX_STORE_VALUE_BYTES) throw new Error("Invalid pickle store write");
+			total += bytes.byteLength;
+			if (total > MAX_STORE_TOTAL_BYTES) throw new Error("Pickle store writes exceed total limit");
+			writes.set[key] = new Uint8Array(bytes);
+		}
 	}
 	return writes;
-}
-
-function defaultWorkerUrl(): URL {
-	// `.ts` when running from source (tests, tsx), `.js` from the published dist.
-	return new URL(import.meta.url.endsWith(".ts") ? "./worker.ts" : "./worker.js", import.meta.url);
 }
 
 interface PendingCall {
@@ -72,59 +61,40 @@ interface ExecutionOptions {
 	globals: ReadonlyMap<string, CodemodeTool>;
 	timeoutMs: number;
 	signal: AbortSignal | undefined;
-	memoryLimitBytes: number | undefined;
 	store: Record<string, string>;
-	wasm: Promise<CodemodeWasmModule>;
-	workerUrl: string | URL;
 }
 
-/**
- * One script run in its own worker and QuickJS VM. A fresh worker per run keeps
- * termination simple: a runaway script, including one that only spins the
- * microtask queue, is killed with `terminate()` and cannot poison a later run.
- */
+/** One trusted Python process per execution; no sandbox or memory-limit promise. */
 class Execution {
 	readonly promise: Promise<CodemodeResult>;
 	private resolveResult!: (result: CodemodeResult) => void;
-	private worker: Worker | undefined;
-	private readonly interrupt = new SharedArrayBuffer(4);
-	private readonly tools: ReadonlyMap<string, CodemodeTool>;
-	private readonly globals: ReadonlyMap<string, CodemodeTool>;
+	private child: ChildProcess | undefined;
+	private server: Server | undefined;
+	private socket: Socket | undefined;
+	private readonly sockets = new Set<Socket>();
 	private readonly signal: AbortSignal | undefined;
-	private readonly timer: NodeJS.Timeout | undefined;
+	private timer: NodeJS.Timeout | undefined;
 	private readonly output: CodemodeOutputItem[] = [];
+	private outputChars = 0;
 	private readonly calls: CodemodeCall[] = [];
 	private readonly pending = new Map<number, PendingCall>();
 	private finished = false;
+	private diagnostics = "";
+	private readonly options: ExecutionOptions;
 
 	constructor(options: ExecutionOptions) {
-		this.promise = new Promise<CodemodeResult>((resolve) => {
-			this.resolveResult = resolve;
-		});
-		this.tools = options.tools;
-		this.globals = options.globals;
+		this.options = options;
+		this.promise = new Promise<CodemodeResult>((resolve) => { this.resolveResult = resolve; });
 		this.signal = options.signal;
-
 		if (Number.isFinite(options.timeoutMs)) {
-			this.timer = setTimeout(() => {
-				this.finish({ kind: "timeout", message: `Execution timed out after ${options.timeoutMs} ms` });
-			}, options.timeoutMs);
+			this.timer = setTimeout(() => this.finish({ kind: "timeout", message: `Execution timed out after ${options.timeoutMs} ms` }), options.timeoutMs);
 		}
-
-		if (options.signal) {
-			if (options.signal.aborted) {
-				this.onAbort();
-			} else {
-				options.signal.addEventListener("abort", this.onAbort, { once: true });
-			}
+		if (options.signal?.aborted) {
+			this.onAbort();
+			return;
 		}
-
-		options.wasm.then(
-			(wasm) => this.start(options, wasm),
-			(error: unknown) => {
-				this.finish({ kind: "sandbox", message: `Failed to load QuickJS: ${errorMessage(error)}` });
-			},
-		);
+		options.signal?.addEventListener("abort", this.onAbort, { once: true });
+		this.start();
 	}
 
 	abort(message: string): Promise<CodemodeResult> {
@@ -132,43 +102,122 @@ class Execution {
 		return this.promise;
 	}
 
-	private start(options: ExecutionOptions, wasm: CodemodeWasmModule): void {
-		if (this.finished) return;
-		const workerData: WorkerData = {
-			code: options.code,
-			tools: [...options.tools.values()].map((tool) => ({
-				name: tool.name,
-				jsName: toCodemodeIdentifier(tool.name),
-				description: tool.description ?? "",
-			})),
-			globals: [...options.globals.values()].map((global) => ({
-				name: global.name,
-				spread: global.spread === true,
-			})),
-			wasm,
-			memoryLimitBytes: options.memoryLimitBytes,
-			store: options.store,
-			interrupt: this.interrupt,
-		};
-		let worker: Worker;
+	private start(): void {
+		const token = randomBytes(32).toString("hex");
+		const server = createServer((socket) => this.accept(socket, token));
+		this.server = server;
+		server.on("error", (error) => this.finish({ kind: "exec", message: `Bridge startup failed: ${errorMessage(error)}` }));
+		server.listen(0, "127.0.0.1", () => {
+			if (this.finished) { server.close(); return; }
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				this.finish({ kind: "exec", message: "Bridge has no listening address" });
+				return;
+			}
+			try {
+				const child = spawn("python3", ["-u", "-c", BOOTSTRAP_SOURCE, String(address.port), token], {
+					detached: process.platform !== "win32",
+					windowsHide: true,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				this.child = child;
+				child.on("error", (error) => this.finish({ kind: "exec", message: `Failed to start python3: ${errorMessage(error)}` }));
+				child.on("exit", (code, signal) => this.finish({
+					kind: "exec",
+					message: `Python exited before the script settled (${signal ?? code})${this.diagnostics ? `: ${this.diagnostics.trim()}` : ""}`,
+				}));
+				this.capture(child.stdout);
+				this.capture(child.stderr);
+			} catch (error) {
+				this.finish({ kind: "exec", message: `Failed to start python3: ${errorMessage(error)}` });
+			}
+		});
+	}
+
+	private capture(stream: ChildProcess["stdout"]): void {
+		if (!stream) return;
+		stream.setEncoding("utf8");
+		let partial = "";
+		stream.on("data", (chunk: string) => {
+			if (this.finished) return;
+			this.diagnostics = (this.diagnostics + chunk).slice(-8192);
+			partial += chunk;
+			if (partial.length > MAX_OUTPUT_CHARS) {
+				this.addOutput({ type: "text", text: partial });
+				partial = "";
+				return;
+			}
+			const lines = partial.split("\n");
+			partial = lines.pop()!;
+			for (const line of lines) this.addOutput({ type: "text", text: line.replace(/\r$/, "") });
+		});
+		stream.on("end", () => { if (partial && !this.finished) this.addOutput({ type: "text", text: partial }); });
+	}
+
+	private accept(socket: Socket, token: string): void {
+		if (this.finished) { socket.destroy(); return; }
+		this.sockets.add(socket);
+		socket.on("close", () => this.sockets.delete(socket));
+		let buffer: Buffer = Buffer.alloc(0);
+		let authenticated = false;
+		socket.on("error", (error) => {
+			if (socket === this.socket) this.finish({ kind: "exec", message: `Bridge failed: ${errorMessage(error)}` });
+		});
+		socket.on("end", () => {
+			if (socket === this.socket) this.finish({ kind: "exec", message: "Python bridge closed before the script settled" });
+		});
+		socket.on("data", (chunk: Buffer) => {
+			if (this.finished) return;
+			buffer = Buffer.concat([buffer, chunk]);
+			try {
+				if (!authenticated) {
+					const newline = buffer.indexOf(10);
+					if (newline === -1) {
+						if (buffer.length > 65) socket.destroy();
+						return;
+					}
+					if (buffer.subarray(0, newline).toString("ascii") !== token || this.socket) { socket.destroy(); return; }
+					authenticated = true;
+					this.socket = socket;
+					buffer = buffer.subarray(newline + 1);
+					// No scripts or pickle values on argv: send them only after the
+					// Python version check and cleanup job have succeeded.
+					this.post({
+						runner: RUNNER_SOURCE,
+						code: this.options.code,
+						tools: [...this.options.tools.values()].map((tool) => ({
+							name: tool.name, alias: toCodemodeIdentifier(tool.name), description: tool.description ?? "",
+						})),
+						globals: [...this.options.globals.values()].map((global) => ({ name: global.name, spread: global.spread === true })),
+						store: this.options.store,
+						limits: { outputChars: MAX_OUTPUT_CHARS, outputItems: MAX_OUTPUT_ITEMS, storeValueBytes: MAX_STORE_VALUE_BYTES, storeTotalBytes: MAX_STORE_TOTAL_BYTES },
+					});
+				}
+				while (buffer.length >= 4 && !this.finished) {
+					const length = buffer.readUInt32BE(0);
+					if (length > MAX_BRIDGE_BYTES) throw new Error("Bridge frame exceeds 64 MiB");
+					if (buffer.length < length + 4) break;
+					const message: unknown = JSON.parse(buffer.subarray(4, 4 + length).toString("utf8"));
+					buffer = buffer.subarray(4 + length);
+					this.handleMessage(message);
+				}
+			} catch (error) {
+				this.finish({ kind: "exec", message: `Invalid Python bridge message: ${errorMessage(error)}` });
+			}
+		});
+	}
+
+	private post(message: HostToPythonMessage | Record<string, unknown>): void {
+		if (this.finished || !this.socket) return;
 		try {
-			worker = new Worker(options.workerUrl, { workerData });
+			const body = Buffer.from(JSON.stringify(message));
+			if (body.length > MAX_BRIDGE_BYTES) throw new Error("Bridge frame exceeds 64 MiB");
+			const header = Buffer.allocUnsafe(4);
+			header.writeUInt32BE(body.length);
+			this.socket.write(Buffer.concat([header, body]));
 		} catch (error) {
-			this.finish({ kind: "sandbox", message: `Failed to start worker: ${errorMessage(error)}` });
-			return;
+			this.finish({ kind: "exec", message: `Bridge write failed: ${errorMessage(error)}` });
 		}
-		this.worker = worker;
-		worker.on("message", (message: unknown) => this.handleMessage(message));
-		worker.on("error", (error: unknown) => {
-			this.finish({
-				kind: "sandbox",
-				name: error instanceof Error ? error.name : undefined,
-				message: errorMessage(error),
-			});
-		});
-		worker.on("exit", (code) => {
-			this.finish({ kind: "sandbox", message: `Worker exited with code ${code} before the script settled` });
-		});
 	}
 
 	private readonly onAbort = (): void => {
@@ -176,186 +225,180 @@ class Execution {
 		this.finish({ kind: "aborted", message: reason instanceof Error ? reason.message : "Execution aborted" });
 	};
 
-	private post(message: HostToWorkerMessage): void {
-		this.worker?.postMessage(message);
-	}
-
-	private handleMessage(message: unknown): void {
-		if (this.finished || !isWorkerToHostMessage(message)) return;
-		switch (message.type) {
-			case "output":
-				this.output.push(message.item);
-				break;
-			case "call":
-				void this.handleCall(message);
-				break;
-			case "done":
-				this.handleDone(message);
-				break;
-			case "crash":
-				this.finish({ kind: "sandbox", message: message.message });
-				break;
-		}
-	}
-
-	private handleDone(message: Extract<WorkerToHostMessage, { type: "done" }>): void {
-		if (!message.ok) {
-			const parsed = JSON.parse(message.error) as Omit<CodemodeError, "kind">;
-			this.finish({ kind: "script", ...parsed });
+	private addOutput(item: CodemodeOutputItem): void {
+		if (this.finished) return;
+		const chars = item.type === "text" ? item.text.length : item.data.length;
+		if (this.outputChars + chars > MAX_OUTPUT_CHARS || this.output.length >= MAX_OUTPUT_ITEMS) {
+			this.finish({ kind: "script", name: "ValueError", message: "script output exceeded the output limits" });
 			return;
 		}
-		this.finish(undefined, message.value === undefined ? undefined : JSON.parse(message.value), message.writes);
+		this.outputChars += chars;
+		this.output.push(item);
 	}
 
-	private async handleCall(message: Extract<WorkerToHostMessage, { type: "call" }>): Promise<void> {
+	private handleMessage(value: unknown): void {
+		if (typeof value !== "object" || value === null) throw new Error("Expected a message object");
+		const message = value as PythonToHostMessage;
+		switch (message.type) {
+			case "output":
+				if (!message.item || !(message.item.type === "text" && typeof message.item.text === "string"
+					|| message.item.type === "image" && typeof message.item.data === "string" && typeof message.item.mimeType === "string")) {
+					throw new Error("Invalid output item");
+				}
+				this.addOutput(message.item);
+				break;
+			case "overflow":
+				this.finish({ kind: "script", name: "ValueError", message: "script output exceeded the output limits" });
+				break;
+			case "call":
+				if (!Number.isSafeInteger(message.id) || this.pending.has(message.id) || typeof message.name !== "string"
+					|| !["tool", "global"].includes(message.target)) throw new Error("Invalid tool call");
+				void this.handleCall(message);
+				break;
+			case "cancel":
+				this.cancelCall(message.id);
+				break;
+			case "done":
+				if (message.ok === true) {
+					if (!message.writes || typeof message.writes !== "object" || Array.isArray(message.writes)) throw new Error("Invalid store writes");
+					this.finish(undefined, message.value, parseStoreWrites(message.writes));
+				} else if (message.ok === false && message.error && typeof message.error.message === "string") {
+					this.finish({ ...message.error, kind: "script" });
+				} else throw new Error("Invalid execution result");
+				break;
+			default: throw new Error("Unknown Python bridge message");
+		}
+	}
+
+	private cancelCall(id: number): void {
+		const pending = this.pending.get(id);
+		if (!pending) return;
+		this.pending.delete(id);
+		if (pending.record) pending.record.durationMs = performance.now() - pending.startedAt;
+		pending.controller.abort();
+	}
+
+	private async handleCall(message: Extract<PythonToHostMessage, { type: "call" }>): Promise<void> {
 		const { id, name } = message;
 		const isTool = message.target === "tool";
 		const record: CodemodeCall | undefined = isTool ? { name, status: "cancelled", durationMs: 0 } : undefined;
 		if (record) this.calls.push(record);
 		const pending: PendingCall = { record, startedAt: performance.now(), controller: new AbortController() };
 		this.pending.set(id, pending);
-
-		let status: CodemodeCallStatus;
-		let reply: HostToWorkerMessage;
+		let reply: HostToPythonMessage;
+		let status: "ok" | "error";
 		try {
-			const tool = (isTool ? this.tools : this.globals).get(name);
+			const tool = (isTool ? this.options.tools : this.options.globals).get(name);
 			if (!tool) throw new Error(`Unknown ${isTool ? "tool" : "global"} "${name}"`);
-			const args: unknown = message.args === undefined ? undefined : JSON.parse(message.args);
-			const value = await tool.execute(args, { signal: pending.controller.signal });
-			reply = { type: "result", id, ok: true, payload: value === undefined ? undefined : JSON.stringify(value) };
+			const value = await tool.execute(message.args, { signal: pending.controller.signal });
+			// Host undefined is JSON null; all other results must survive JSON serialization.
+			const json = JSON.stringify(value === undefined ? null : value);
+			if (json === undefined) throw new TypeError("Tool result is not JSON-serializable");
+			reply = { type: "result", id, ok: true, value: JSON.parse(json) };
 			status = "ok";
 		} catch (error) {
-			reply = { type: "result", id, ok: false, payload: errorMessage(error) };
+			reply = { type: "result", id, ok: false, message: errorMessage(error) };
 			status = "error";
 		}
-
-		// Already cancelled by finish(): the record keeps "cancelled" and the
-		// worker is gone or going.
 		if (!this.pending.delete(id)) return;
-		if (record) {
-			record.status = status;
-			record.durationMs = performance.now() - pending.startedAt;
-		}
+		if (record) { record.status = status; record.durationMs = performance.now() - pending.startedAt; }
 		this.post(reply);
 	}
 
-	private finish(error: CodemodeError | undefined, value?: unknown, writes?: string): void {
+	private finish(error: CodemodeError | undefined, value?: unknown, writes?: CodemodeStoreWrites): void {
 		if (this.finished) return;
 		this.finished = true;
 		clearTimeout(this.timer);
 		this.signal?.removeEventListener("abort", this.onAbort);
-
-		const now = performance.now();
-		for (const pending of this.pending.values()) {
-			if (pending.record) pending.record.durationMs = now - pending.startedAt;
-			pending.controller.abort();
-		}
-		this.pending.clear();
-
+		for (const id of this.pending.keys()) this.cancelCall(id);
 		const result: CodemodeResult = error
 			? { ok: false, error, output: this.output, calls: this.calls }
-			: {
-					ok: true,
-					value,
-					output: this.output,
-					calls: this.calls,
-					storeWrites: writes === undefined ? { set: {}, delete: [] } : parseStoreWrites(writes),
-				};
-		if (!this.worker) {
+			: { ok: true, value, output: this.output, calls: this.calls, storeWrites: writes ?? { set: {}, delete: [] } };
+		this.server?.close();
+		// Keep the bridge open during normal cleanup: on POSIX, closing it first
+		// would invoke the host-death watchdog's immediate group SIGKILL instead
+		// of giving descendants their graceful termination window.
+		void this.terminate().then(() => {
+			for (const socket of this.sockets) socket.destroy();
 			this.resolveResult(result);
-			return;
+		});
+	}
+
+	private async terminate(): Promise<void> {
+		const child = this.child;
+		if (!child?.pid) return;
+		const pid = child.pid;
+		if (process.platform === "win32") {
+			// TerminateProcess closes the runner's non-inherited Job Object handle,
+			// causing the OS to terminate all descendants in the job.
+			child.kill();
+			await new Promise<void>((resolve) => {
+				if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+				const timer = setTimeout(resolve, 500);
+				child.once("exit", () => { clearTimeout(timer); resolve(); });
+			});
+		} else {
+			const killGroup = (signal: NodeJS.Signals) => { try { process.kill(-pid, signal); } catch { /* already gone */ } };
+			killGroup("SIGTERM");
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			// Kill the group even if the root has already exited: descendants may
+			// ignore SIGTERM, and root exit alone is not proof of tree cleanup.
+			killGroup("SIGKILL");
 		}
-		Atomics.store(new Int32Array(this.interrupt), 0, 1);
-		this.worker
-			.terminate()
-			.catch(() => undefined)
-			.then(() => this.resolveResult(result));
+		child.stdout?.destroy();
+		child.stderr?.destroy();
 	}
 }
 
-/**
- * Runs JavaScript in a QuickJS VM (a separate wasm instance) inside a worker
- * thread. The script sees `tools.<name>(args)` for every registered tool, `ALL_TOOLS`,
- * the output helpers `text`, `image`, `exit`, and `console.*`, `store`/`load`, and the
- * configured globals; nothing else (no timers, `fetch`, `process`, `require`, modules).
- *
- * Each `execute()` gets its own worker and VM; the sandbox only holds the tool
- * table and defaults. `close()` aborts in-flight executions.
- */
-export class CodemodeSandbox {
+/** Runs trusted Python with tool access in a fresh system process per execution. */
+export class CodemodeExecutionEnv {
 	private readonly toolsByName = new Map<string, CodemodeTool>();
 	private readonly globalsByName = new Map<string, CodemodeTool>();
 	private readonly timeoutMs: number;
-	private readonly memoryLimitBytes: number | undefined;
-	private readonly wasm: CodemodeWasmModule | Promise<CodemodeWasmModule> | undefined;
-	private readonly workerUrl: string | URL;
 	private readonly running = new Set<Execution>();
 	private closed = false;
 
-	constructor(options: CodemodeSandboxOptions = {}) {
+	constructor(options: CodemodeExecutionEnvOptions = {}) {
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-		this.memoryLimitBytes = options.memoryLimitBytes;
-		this.wasm = options.wasm;
-		this.workerUrl = options.workerUrl ?? defaultWorkerUrl();
 		for (const tool of options.tools ?? []) this.registerTool(tool);
 		const namespaces = new Set<string>();
 		for (const global of options.globals ?? []) {
 			const parts = global.name.split(".");
-			if (parts.length > 2 || !parts.every((part) => IDENTIFIER.test(part)) || RESERVED_GLOBALS.has(parts[0])) {
-				throw new Error(`Invalid global name "${global.name}"`);
-			}
+			if (parts.length > 2 || !parts.every((part) => IDENTIFIER.test(part)) || RESERVED_GLOBALS.has(parts[0])) throw new Error(`Invalid global name "${global.name}"`);
 			if (this.globalsByName.has(global.name)) throw new Error(`Global "${global.name}" is already registered`);
 			if (parts.length === 2) namespaces.add(parts[0]);
 			this.globalsByName.set(global.name, global);
 		}
-		for (const name of namespaces) {
-			if (this.globalsByName.has(name)) throw new Error(`Global "${name}" conflicts with the namespace "${name}"`);
-		}
+		for (const name of namespaces) if (this.globalsByName.has(name)) throw new Error(`Global "${name}" conflicts with the namespace "${name}"`);
 	}
 
-	/** Throws if a tool with the same name is already registered. */
 	registerTool(tool: CodemodeTool): void {
 		if (this.toolsByName.has(tool.name)) throw new Error(`Tool "${tool.name}" is already registered`);
 		this.toolsByName.set(tool.name, tool);
 	}
 
-	unregisterTool(name: string): boolean {
-		return this.toolsByName.delete(name);
-	}
+	unregisterTool(name: string): boolean { return this.toolsByName.delete(name); }
+	get tools(): CodemodeTool[] { return [...this.toolsByName.values()]; }
+	get globals(): CodemodeTool[] { return [...this.globalsByName.values()]; }
 
-	get tools(): CodemodeTool[] {
-		return [...this.toolsByName.values()];
-	}
-
-	get globals(): CodemodeTool[] {
-		return [...this.globalsByName.values()];
-	}
-
-	/**
-	 * `code` is an async function body: `return` and top-level `await` work.
-	 * Never rejects for script failures; those come back as `{ ok: false }`.
-	 * The script can use `store(key, value)` and `load(key)` on `options.store`.
-	 */
 	execute(code: string, options: CodemodeExecuteOptions = {}): Promise<CodemodeResult> {
-		if (this.closed) return Promise.reject(new Error("Sandbox is closed"));
+		if (this.closed) return Promise.reject(new Error("Execution environment is closed"));
+		let store: Record<string, string>;
+		try { store = serializeStore(options.store); }
+		catch (error) { return Promise.resolve({ ok: false, error: { kind: "exec", message: errorMessage(error) }, output: [], calls: [] }); }
 		const execution = new Execution({
-			code,
-			tools: new Map(this.toolsByName),
-			globals: this.globalsByName,
-			timeoutMs: options.timeoutMs ?? this.timeoutMs,
-			signal: options.signal,
-			memoryLimitBytes: this.memoryLimitBytes,
-			store: serializeStore(options.store),
-			wasm: this.wasm === undefined ? loadQuickJSWasm() : Promise.resolve(this.wasm),
-			workerUrl: this.workerUrl,
+			code, tools: new Map(this.toolsByName), globals: this.globalsByName,
+			timeoutMs: options.timeoutMs ?? this.timeoutMs, signal: options.signal, store,
 		});
 		this.running.add(execution);
 		return execution.promise.finally(() => this.running.delete(execution));
 	}
 
-	/** Aborts in-flight executions (they resolve with `kind: "aborted"`) and rejects new ones. */
 	async close(): Promise<void> {
 		this.closed = true;
-		await Promise.all([...this.running].map((execution) => execution.abort("Sandbox closed")));
+		await Promise.all([...this.running].map((execution) => execution.abort("Execution environment closed")));
 	}
 }
+
+/** @deprecated Compatibility name only; execution is trusted and unsandboxed. */
+export { CodemodeExecutionEnv as CodemodeSandbox };

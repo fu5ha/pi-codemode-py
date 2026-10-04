@@ -10,13 +10,13 @@ export {
 	schemaToType,
 } from "./declarations.ts";
 export { toCodemodeIdentifier } from "./identifier.ts";
-export { CodemodeSandbox } from "./runtime/host.ts";
+export { CodemodeExecutionEnv, CodemodeSandbox } from "./runtime/host.ts";
 export {
 	MAX_OUTPUT_CHARS,
 	MAX_OUTPUT_ITEMS,
-	MAX_STORE_TOTAL_CHARS,
-	MAX_STORE_VALUE_CHARS,
-} from "./runtime/prelude-source.ts";
+	MAX_STORE_TOTAL_BYTES,
+	MAX_STORE_VALUE_BYTES,
+} from "./runtime/limits.ts";
 export {
 	CODEMODE_OPTIONS_PREFIX,
 	CODEMODE_SOURCE_GRAMMAR,
@@ -31,6 +31,7 @@ export type {
 	CodemodeError,
 	CodemodeErrorKind,
 	CodemodeExecuteOptions,
+	CodemodeExecutionEnvOptions,
 	CodemodeJsonSchema,
 	CodemodeOutputItem,
 	CodemodeResult,
@@ -39,4 +40,3 @@ export type {
 	CodemodeTool,
 	CodemodeToolContext,
 } from "./types.ts";
-export { type CodemodeWasmModule, loadQuickJSWasm } from "./wasm.ts";
