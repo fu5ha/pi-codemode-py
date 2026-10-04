@@ -1,7 +1,7 @@
 {
-	"name": "@earendil-works/pi-codemode",
+	"name": "@fu5ha/pi-codemode-py",
 	"version": "1.0.2",
-	"description": "Sandboxed JavaScript execution where the only capability is calling injected tools",
+	"description": "Trusted Python execution with injected tools for Pi",
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -29,28 +29,21 @@
 	},
 	"files": [
 		"dist",
-		"README.md"
+		"src"
 	],
 	"scripts": {
-		"clean": "shx rm -rf dist",
+		"clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
 		"build": "tsc -p tsconfig.build.json",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepack": "npm run clean && npm run build"
 	},
 	"keywords": [
 		"pi",
 		"codemode",
-		"sandbox",
-		"quickjs",
-		"wasm"
+		"python"
 	],
 	"author": "Earendil Works",
 	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
-		"directory": "packages/codemode"
-	},
 	"engines": {
 		"node": ">=22.19.0"
 	},
@@ -58,7 +51,8 @@
 		"quickjs-wasi": "3.6.2"
 	},
 	"devDependencies": {
-		"shx": "0.4.0",
+		"@types/node": "22.19.19",
+		"typescript": "7.0.2",
 		"vitest": "4.1.11"
 	}
 }
