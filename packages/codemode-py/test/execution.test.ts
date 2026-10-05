@@ -53,6 +53,42 @@ describe("script execution", () => {
 		expect(await env.execute("import asyncio, pathlib\nawait asyncio.sleep(0.01)\nreturn pathlib.Path('x').name")).toMatchObject({ ok: true, value: "x" });
 	});
 
+	it("uses UTF-8 mode for default pathlib and open text file encoding", async () => {
+		const content = "café 日本語 🐍";
+		const result = await createEnv().execute(py(`
+			import pathlib, sys, tempfile
+			content = ${JSON.stringify(content)}
+			with tempfile.TemporaryDirectory() as directory:
+			    path = pathlib.Path(directory) / "text.txt"
+			    path.write_text(content)
+			    pathlib_uses_utf8 = path.read_bytes() == content.encode("utf-8")
+			    with open(path) as file:
+			        open_read = file.read()
+			    with open(path, "w") as file:
+			        file.write(content)
+			    open_uses_utf8 = path.read_bytes() == content.encode("utf-8")
+			    path.write_bytes(content.encode("utf-8"))
+			    pathlib_read = path.read_text()
+			    return {
+			        "utf8_mode": sys.flags.utf8_mode,
+			        "pathlib_uses_utf8": pathlib_uses_utf8,
+			        "open_uses_utf8": open_uses_utf8,
+			        "pathlib_read": pathlib_read,
+			        "open_read": open_read,
+			    }
+		`));
+		expect(result).toMatchObject({
+			ok: true,
+			value: {
+				utf8_mode: 1,
+				pathlib_uses_utf8: true,
+				open_uses_utf8: true,
+				pathlib_read: content,
+				open_read: content,
+			},
+		});
+	});
+
 	// New regression: textual function wrapping silently changed multiline
 	// literals, including strings embedded in nested async functions.
 	it("preserves multiline literals while wrapping original-source AST nodes", async () => {

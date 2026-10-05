@@ -114,7 +114,8 @@ class Execution {
 				return;
 			}
 			try {
-				const child = spawn("python3", ["-u", "-c", BOOTSTRAP_SOURCE, String(address.port), token], {
+				// Set default text-file encoding independently of the host locale (notably Windows).
+				const child = spawn("python3", ["-X", "utf8", "-u", "-c", BOOTSTRAP_SOURCE, String(address.port), token], {
 					detached: process.platform !== "win32",
 					windowsHide: true,
 					cwd: this.options.cwd,

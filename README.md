@@ -210,8 +210,9 @@ Async tool wrappers start calls only when awaited or scheduled, following normal
 
 ## How it works
 
-Each `execute()` starts a Python process. The execution environment uses system python, and is
-intentionally not sandboxed.
+Each `execute()` starts a Python process. The execution environment uses system python in UTF-8 mode
+(`-X utf8`), so default text-file reads and writes use UTF-8 regardless of the host locale. Explicit
+`encoding=` arguments still take precedence. It is intentionally not sandboxed.
 
 The script is compiled as an async Python function body with access to `tools` and the helper functions. Use `codemode.py` as the compile filename and adjust wrapper line offsets so tracebacks match the submitted source.
 
