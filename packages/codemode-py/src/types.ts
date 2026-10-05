@@ -110,9 +110,6 @@ export interface CodemodeExecutionEnvOptions {
 	timeoutMs?: number;
 }
 
-/** @deprecated Use CodemodeExecutionEnvOptions; execution is not sandboxed. */
-export type CodemodeSandboxOptions = CodemodeExecutionEnvOptions;
-
 export interface CodemodeExecuteOptions {
 	signal?: AbortSignal;
 	/** Overrides the environment default for this execution. */

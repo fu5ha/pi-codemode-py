@@ -397,6 +397,3 @@ export class CodemodeExecutionEnv {
 		await Promise.all([...this.running].map((execution) => execution.abort("Execution environment closed")));
 	}
 }
-
-/** @deprecated Compatibility name only; execution is trusted and unsandboxed. */
-export { CodemodeExecutionEnv as CodemodeSandbox };

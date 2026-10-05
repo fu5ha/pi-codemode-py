@@ -77,8 +77,8 @@
   <ul>
     <li><strong>Trusted, unsandboxed execution.</strong> Requires Node 22.19+ and Python
       3.12+ on PATH. Ordinary filesystem, networking and Python libraries are available.
-      <code>CodemodeExecutionEnv</code> replaces the old name, with a deprecated
-      <code>CodemodeSandbox</code> compatibility alias.</li>
+      The runtime API is <code>CodemodeExecutionEnv</code>, with no deprecated
+      compatibility alias.</li>
     <li><strong>Portable IPC.</strong> Authenticated loopback TCP carries length-prefixed JSON,
       separate from stdout/stderr. Windows inherited-descriptor differences motivated this
       choice. A 64 MiB frame ceiling bounds transport; oversized frames are execution errors.</li>

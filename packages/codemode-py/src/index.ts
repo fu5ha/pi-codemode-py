@@ -10,7 +10,7 @@ export {
 	schemaToType,
 } from "./declarations.ts";
 export { toCodemodeIdentifier } from "./identifier.ts";
-export { CodemodeExecutionEnv, CodemodeSandbox } from "./runtime/host.ts";
+export { CodemodeExecutionEnv } from "./runtime/host.ts";
 export {
 	MAX_OUTPUT_CHARS,
 	MAX_OUTPUT_ITEMS,
@@ -35,7 +35,6 @@ export type {
 	CodemodeJsonSchema,
 	CodemodeOutputItem,
 	CodemodeResult,
-	CodemodeSandboxOptions,
 	CodemodeStoreWrites,
 	CodemodeTool,
 	CodemodeToolContext,

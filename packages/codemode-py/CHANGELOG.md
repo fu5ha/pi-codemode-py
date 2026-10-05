@@ -24,7 +24,7 @@
 
 ### Changed
 
-- Allowed `CodemodeSandbox.workerUrl` to be a string, as required for embedded worker entrypoints in Bun compiled executables ([#10204](https://github.com/earendil-works/pi/issues/10204)).
+- Allowed the upstream JavaScript runtime's `workerUrl` option to be a string, as required for embedded worker entrypoints in Bun compiled executables ([#10204](https://github.com/earendil-works/pi/issues/10204)).
 
 ### Fixed
 
@@ -36,4 +36,4 @@
 
 ### Added
 
-- Initial spike: `CodemodeSandbox` runs model-written JavaScript in a worker thread and exposes injected tools as `tools.<name>(args)` async functions.
+- Initial upstream spike: the JavaScript runtime runs model-written JavaScript in a worker thread and exposes injected tools as `tools.<name>(args)` async functions.
