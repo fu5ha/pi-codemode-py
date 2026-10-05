@@ -6,8 +6,8 @@
  * `setActiveTools()`; the MCP extension activates it when MCP tools are only reachable from scripts.
  */
 
-import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
-import type { CodemodeMode } from "../../core/settings-manager.ts";
+import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { CodemodeMode } from "./tool.ts";
 import { createCodemodeToolDefinition } from "./tool.ts";
 
 export interface CodemodeExtensionOptions {

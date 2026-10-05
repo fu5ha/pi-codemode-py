@@ -7,12 +7,8 @@
  * separate tool rows because they never reach the model as tool calls.
  */
 
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import type { ToolDefinition } from "../../core/extensions/types.ts";
-import { getTextOutput, replaceTabs, str } from "../../core/tools/render-utils.ts";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
-import { highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
+import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { keyHint, highlightCode, truncateToVisualLines, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CodemodeNestedCall, CodemodeToolDetails } from "./tool.ts";
 
 const CODE_PREVIEW_LINES = 10;
@@ -20,6 +16,29 @@ const CALL_PREVIEW_COUNT = 8;
 const OUTPUT_PREVIEW_LINES = 5;
 const COLLAPSED_ARGS_CHARS = 80;
 const SCRIPT_HEADER = /^Script (completed|failed)\nWall time [\d.]+ seconds\nOutput:\n$/;
+
+const replaceTabs = (value: string) => value.replaceAll("\t", "    ");
+const str = (value: unknown) => typeof value === "string" ? value : null;
+
+/** Thin component over Pi's public width-aware truncation; no private TUI imports. */
+class VisualLinePreview implements Component {
+	constructor(private readonly options: {
+		text: string; maxVisualLines: number; keep: "start" | "end"; formatHint(hidden: number): string;
+	}) {}
+	render(width: number): string[] {
+		const { text, maxVisualLines, keep, formatHint } = this.options;
+		const result = truncateToVisualLines(text, maxVisualLines, width, 0, keep);
+		if (!result.skippedCount) return result.visualLines;
+		const hint = truncateToWidth(formatHint(result.skippedCount), width, "...");
+		return keep === "start" ? [...result.visualLines, hint] : [hint, ...result.visualLines];
+	}
+	invalidate(): void {}
+}
+
+function getTextOutput(result: { content: { type: string; text?: string }[] }, showImages: boolean): string {
+	return result.content.map((item) => item.type === "text" ? item.text ?? "" :
+		item.type === "image" && !showImages ? "[image]" : "").filter(Boolean).join("\n");
+}
 
 function expandHint(theme: Theme, hidden: number, noun: string): string {
 	return `${theme.fg("muted", `... (${hidden} more ${noun},`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
@@ -67,7 +86,7 @@ export const codemodeRenderers: Pick<
 	"renderCall" | "renderResult"
 > = {
 	renderCall(args, theme, context) {
-		// The code includes the `// @options:` line, so options show as part of the script.
+		// Options remain visible as part of the Python source.
 		const code = str((args as { code?: unknown } | undefined)?.code);
 		const title = theme.fg("toolTitle", theme.bold("codemode"));
 		const component = (context.lastComponent as Container | undefined) ?? new Container();
@@ -78,7 +97,7 @@ export const codemodeRenderers: Pick<
 		}
 		component.addChild(new Text(title, 0, 0));
 		if (code) {
-			const highlighted = highlightCode(replaceTabs(code.replace(/\r/g, "").trimEnd()), "javascript").join("\n");
+			const highlighted = highlightCode(replaceTabs(code.replace(/\r/g, "").trimEnd()), "python").join("\n");
 			component.addChild(
 				context.expanded
 					? new Text(highlighted, 0, 0)

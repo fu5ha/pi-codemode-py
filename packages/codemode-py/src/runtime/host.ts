@@ -54,6 +54,7 @@ interface PendingCall {
 }
 
 interface ExecutionOptions {
+	cwd: string | undefined;
 	code: string;
 	tools: ReadonlyMap<string, CodemodeTool>;
 	globals: ReadonlyMap<string, CodemodeTool>;
@@ -116,6 +117,7 @@ class Execution {
 				const child = spawn("python3", ["-u", "-c", BOOTSTRAP_SOURCE, String(address.port), token], {
 					detached: process.platform !== "win32",
 					windowsHide: true,
+					cwd: this.options.cwd,
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 				this.child = child;
@@ -353,11 +355,13 @@ export class CodemodeExecutionEnv {
 	private readonly toolsByName = new Map<string, CodemodeTool>();
 	private readonly globalsByName = new Map<string, CodemodeTool>();
 	private readonly timeoutMs: number;
+	private readonly cwd: string | undefined;
 	private readonly running = new Set<Execution>();
 	private closed = false;
 
 	constructor(options: CodemodeExecutionEnvOptions = {}) {
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+		this.cwd = options.cwd;
 		for (const tool of options.tools ?? []) this.registerTool(tool);
 		validateGlobalNames(options.globals ?? []);
 		for (const global of options.globals ?? []) {
@@ -380,6 +384,7 @@ export class CodemodeExecutionEnv {
 		try { store = serializeStore(options.store); }
 		catch (error) { return Promise.resolve({ ok: false, error: { kind: "exec", message: errorMessage(error) }, output: [], calls: [] }); }
 		const execution = new Execution({
+			cwd: this.cwd,
 			code, tools: new Map(this.toolsByName), globals: this.globalsByName,
 			timeoutMs: options.timeoutMs ?? this.timeoutMs, signal: options.signal, store,
 		});

@@ -1,0 +1,12 @@
+{
+	"name": "pi-codemode-py-workspace",
+	"private": true,
+	"type": "module",
+	"workspaces": ["packages/codemode-py", "packages/extensions/codemode"],
+	"pi": { "extensions": ["packages/extensions/codemode/dist/index.js"] },
+	"scripts": {
+		"build": "npm run build -w @fu5ha/pi-codemode-py && npm run build -w @fu5ha/pi-codemode-py-extension",
+		"test": "npm run test -w @fu5ha/pi-codemode-py && npm run test -w @fu5ha/pi-codemode-py-extension",
+		"prepare": "npm run build"
+	}
+}

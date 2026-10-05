@@ -1,7 +1,4 @@
-/**
- * Runs one codemode script in the sandbox. Split from tool.ts and loaded through
- * execute.lazy.ts so the sandbox runtime only loads when a script runs.
- */
+/** Lazy-loaded adapter for one trusted Python execution. */
 
 import type { AgentTool, AgentToolCallOutcome, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
@@ -16,20 +13,15 @@ import type {
 } from "@earendil-works/pi-ai";
 import {
 	type CodemodeResult,
-	CodemodeSandbox,
+	CodemodeExecutionEnv,
 	type CodemodeTool,
-	loadQuickJSWasm,
 	parseCodemodeSource,
 	renderToolSample,
 	toCodemodeIdentifier,
-} from "@earendil-works/pi-codemode";
-import { getCodemodeWorkerSpecifier, getQuickJSWasmPath } from "../../config.ts";
-import type { ExtensionToolContext, ToolNamespace } from "../../core/extensions/types.ts";
-import type { SessionEntry } from "../../core/session-manager.ts";
-import { formatSize } from "../../core/tools/truncate.ts";
-import { combineUsage } from "../../core/usage-totals.ts";
-import { writeOutputFile } from "../../utils/output-files.ts";
-import { Bm25Ranker, createToolSearchDocument, DEFAULT_TOOL_SEARCH_LIMIT } from "../tool-search/tool.ts";
+} from "@fu5ha/pi-codemode-py";
+import { formatSize, type ExtensionToolContext, type ToolNamespace, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { combineUsage, writeOutputFile } from "./utilities.ts";
+import { Bm25Ranker, createToolSearchDocument, DEFAULT_TOOL_SEARCH_LIMIT } from "./search.ts";
 import {
 	CODEMODE_DOCS_PATH,
 	CODEMODE_STORE_ENTRY_TYPE,
@@ -47,12 +39,6 @@ const ARGS_PREVIEW_CHARS = 200;
 const ERROR_PREVIEW_CHARS = 500;
 /** `models.classify()` and `models.generateImages()` calls one script may have in flight; `Promise.all` over many items queues the rest. */
 const MAX_CONCURRENT_MODEL_CALLS = 4;
-/**
- * Heap limit for the QuickJS VM. The worker shares pi's process, so without a limit a runaway
- * script can grow to wasm32's 4 GiB and take the session down. Overruns throw
- * `InternalError: out of memory` inside the script.
- */
-const CODEMODE_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
 const MODEL_TYPES: ReadonlySet<string> = new Set<ModelType>(["chat", "image", "classifier"]);
 
 function truncateText(text: string, maxChars: number): string {
@@ -207,22 +193,26 @@ function isStoreEntryData(data: unknown): data is CodemodeStoreEntryData {
 	if (typeof data !== "object" || data === null) return false;
 	const { set, delete: deleted } = data as Partial<CodemodeStoreEntryData>;
 	return (
+		(data as Partial<CodemodeStoreEntryData>).version === 1 &&
+		(data as Partial<CodemodeStoreEntryData>).encoding === "pickle-base64" &&
 		typeof set === "object" &&
 		set !== null &&
+		!Array.isArray(set) &&
+		Object.values(set).every((value) => typeof value === "string" && Buffer.from(value, "base64").toString("base64") === value) &&
 		Array.isArray(deleted) &&
 		deleted.every((key: unknown) => typeof key === "string")
 	);
 }
 
 /** Values of `load()`: the `codemode-store` entries on the branch, applied from the root. */
-export function readCodemodeStore(branch: readonly SessionEntry[]): Record<string, unknown> {
-	const store = new Map<string, unknown>();
+export function readCodemodeStore(branch: readonly SessionEntry[]): Record<string, Uint8Array> {
+	const store = new Map<string, Uint8Array>();
 	for (const entry of branch) {
 		if (entry.type !== "custom" || entry.customType !== CODEMODE_STORE_ENTRY_TYPE || !isStoreEntryData(entry.data)) {
 			continue;
 		}
 		for (const key of entry.data.delete) store.delete(key);
-		for (const [key, value] of Object.entries(entry.data.set)) store.set(key, value);
+		for (const [key, value] of Object.entries(entry.data.set)) store.set(key, Buffer.from(value, "base64"));
 	}
 	return Object.fromEntries(store);
 }
@@ -252,7 +242,7 @@ function formatError(result: Extract<CodemodeResult, { ok: false }>, calls: read
 				? `Script timed out: ${error.message}`
 				: error.kind === "aborted"
 					? `Script aborted: ${error.message}`
-					: `Script sandbox failed: ${error.message}`;
+					: `Python execution failed: ${error.message}`;
 	return `${head}\n\n${formatCallSummary(calls)}`;
 }
 
@@ -265,7 +255,7 @@ async function spillOutput(text: string): Promise<{ path: string } | { error: st
 	}
 }
 
-/** File extensions of the image types `image()` accepts. Must list every type the sandbox's `image()` detects. */
+/** File extensions of the image types accepted by the runtime. */
 const IMAGE_EXTENSIONS: Record<string, string> = {
 	"image/png": ".png",
 	"image/jpeg": ".jpg",
@@ -275,8 +265,7 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
 
 /**
  * Save each image to a temp file and put a text item with its path before it. The model sees the
- * image but has no other way to reach its bytes: scripts cannot write files, and `write` only takes
- * text. Images shown more than once are saved once.
+ * image and can retrieve its bytes later. Images shown more than once are saved once.
  */
 async function saveImages(items: (TextContent | ImageContent)[]): Promise<(TextContent | ImageContent)[]> {
 	const labels = new Map<string, Promise<string>>();
@@ -365,6 +354,9 @@ export async function executeCodemode(
 	options: CodemodeToolOptions = {},
 ): Promise<AgentToolResult<CodemodeToolDetails>> {
 	const startedAt = performance.now();
+	if (ctx && typeof ctx.executeTool !== "function") {
+		throw new Error("Python codemode requires Pi's public ctx.executeTool nested-call pipeline; this Pi version does not provide it.");
+	}
 	const { code, options: sourceOptions } = parseCodemodeSource(input.code);
 	const calls: CodemodeNestedCall[] = [];
 	// Usage of the script's `models.*` calls. Nested tool calls report theirs through the session.
@@ -384,7 +376,7 @@ export async function executeCodemode(
 	const callable = ctx ? getCodemodeCallableTools(ctx.tools) : [];
 	// ALL_TOOLS entries carry the declaration.
 	const samples = new Map(callable.map((tool) => [tool.name, renderToolSample(toCodemodeDeclaration(tool))]));
-	const sandboxTools: CodemodeTool[] = callable.map((tool) => ({
+	const runtimeTools: CodemodeTool[] = callable.map((tool) => ({
 		name: tool.name,
 		description: samples.get(tool.name),
 		execute: async (args, { signal: callSignal }) => {
@@ -399,22 +391,26 @@ export async function executeCodemode(
 			const callStartedAt = performance.now();
 			// Only tools from ctx.tools are callable, so ctx is set here.
 			if (!ctx) throw new Error("Tool calls need a session");
-			const outcome = await ctx.executeTool(tool.name, args, { signal: callSignal });
-			record.id = outcome.toolCall.id;
-			record.durationMs = performance.now() - callStartedAt;
-			if (outcome.isError) {
+			try {
+				const outcome = await ctx.executeTool(tool.name, args, { signal: callSignal });
+				record.id = outcome.toolCall.id;
+				record.status = outcome.isError ? (callSignal.aborted ? "cancelled" : "error") : "ok";
+				if (outcome.isError) record.error = truncateText(textOf(outcome.result) || `Tool "${tool.name}" failed`, ERROR_PREVIEW_CHARS);
+				return toScriptValue(tool, outcome);
+			} catch (error) {
 				record.status = callSignal.aborted ? "cancelled" : "error";
-				record.error = truncateText(textOf(outcome.result) || `Tool "${tool.name}" failed`, ERROR_PREVIEW_CHARS);
-			} else {
-				record.status = "ok";
+				record.error = truncateText(error instanceof Error ? error.message : String(error), ERROR_PREVIEW_CHARS);
+				throw error;
+			} finally {
+				record.durationMs = performance.now() - callStartedAt;
+				publish();
 			}
-			publish();
-			return toScriptValue(tool, outcome);
 		},
 	}));
 
-	const sandbox = new CodemodeSandbox({
-		tools: sandboxTools,
+	const environment = new CodemodeExecutionEnv({
+		cwd: ctx?.cwd,
+		tools: runtimeTools,
 		globals: [
 			...createDiscoveryGlobals(callable, samples, options),
 			...(options.models && ctx
@@ -422,17 +418,14 @@ export async function executeCodemode(
 				: []),
 		],
 		timeoutMs: sourceOptions.timeoutMs ?? Number.POSITIVE_INFINITY,
-		memoryLimitBytes: CODEMODE_MEMORY_LIMIT_BYTES,
-		wasm: loadQuickJSWasm(getQuickJSWasmPath()),
-		workerUrl: getCodemodeWorkerSpecifier(),
 	});
 
 	let result: CodemodeResult;
 	try {
 		const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
-		result = await sandbox.execute(code, { signal, store });
+		result = await environment.execute(code, { signal, store });
 	} finally {
-		await sandbox.close();
+		await environment.close();
 	}
 	// Calls still marked running were cut off by the script ending, a timeout, or an abort.
 	for (const call of calls) {
@@ -445,7 +438,12 @@ export async function executeCodemode(
 	if (result.ok) {
 		const { set, delete: deleted } = result.storeWrites;
 		if (Object.keys(set).length > 0 || deleted.length > 0) {
-			options.appendEntry?.(CODEMODE_STORE_ENTRY_TYPE, { set, delete: deleted });
+			options.appendEntry?.(CODEMODE_STORE_ENTRY_TYPE, {
+				version: 1,
+				encoding: "pickle-base64",
+				set: Object.fromEntries(Object.entries(set).map(([key, value]) => [key, Buffer.from(value).toString("base64")])),
+				delete: deleted,
+			});
 		}
 		// pi extension: a returned value is appended like text().
 		if (result.value !== undefined) items.push({ type: "text", text: valueText(result.value) });
@@ -583,11 +581,12 @@ function createModelGlobals(
 		type: TType,
 		[model, context]: unknown[],
 		checkContext: (context: unknown) => TContext,
+		signal: AbortSignal,
 		run: (resolved: ModelTypeMap[TType], context: TContext) => Promise<TResult>,
 	): Promise<TResult> => {
 		const listHint = `List the ${type} models you can use with models.getAvailableOfType("${type}").`;
 		if (!isRecord(model) || typeof model.provider !== "string" || typeof model.id !== "string") {
-			// undefined arrives as null: spread arguments cross the sandbox as a JSON array.
+			// Missing model values arrive as null through JSON.
 			const undefinedHint =
 				model === undefined || model === null
 					? " models.getModelOfType() returns undefined for an unknown provider or id."
@@ -620,16 +619,27 @@ function createModelGlobals(
 		calls.push(record);
 		publish();
 		const startedAt = performance.now();
-		const result = await limit(() => run(resolved, checked));
-		record.durationMs = performance.now() - startedAt;
-		record.status = result.stopReason === "stop" ? "ok" : result.stopReason === "aborted" ? "cancelled" : "error";
-		if (result.errorMessage) record.error = truncateText(result.errorMessage, ERROR_PREVIEW_CHARS);
-		if (result.usage) {
-			record.cost = result.usage.cost.total;
-			addUsage(result.usage);
+		try {
+			const result = await limit(() => {
+				// Cancellation may happen while this call waits for the shared four-call slot.
+				signal.throwIfAborted();
+				return run(resolved, checked);
+			});
+			record.status = result.stopReason === "stop" ? "ok" : result.stopReason === "aborted" ? "cancelled" : "error";
+			if (result.errorMessage) record.error = truncateText(result.errorMessage, ERROR_PREVIEW_CHARS);
+			if (result.usage) {
+				record.cost = result.usage.cost.total;
+				addUsage(result.usage);
+			}
+			return result;
+		} catch (error) {
+			record.status = signal.aborted ? "cancelled" : "error";
+			record.error = truncateText(error instanceof Error ? error.message : String(error), ERROR_PREVIEW_CHARS);
+			throw error;
+		} finally {
+			record.durationMs = performance.now() - startedAt;
+			publish();
 		}
-		publish();
-		return result;
 	};
 	const implementations: Record<string, CodemodeTool["execute"]> = {
 		"models.getModelsOfType": (args) => {
@@ -652,7 +662,7 @@ function createModelGlobals(
 			return model === undefined ? undefined : toModelInfo(model);
 		},
 		"models.classify": (args, { signal }) =>
-			runModelCall("models.classify", "classifier", args as unknown[], checkClassifierContext, (resolved, context) =>
+			runModelCall("models.classify", "classifier", args as unknown[], checkClassifierContext, signal, (resolved, context) =>
 				models.classify(resolved, context, { signal }),
 			),
 		"models.generateImages": (args, { signal }) =>
@@ -661,6 +671,7 @@ function createModelGlobals(
 				"image",
 				args as unknown[],
 				checkImagesContext,
+				signal,
 				async (resolved, context) => {
 					const result = await models.generateImages(resolved, context, { signal });
 					addGeneratedImages(result.output.filter((block) => block.type === "image").length);

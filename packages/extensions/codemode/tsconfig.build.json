@@ -1,0 +1,15 @@
+{
+	"compilerOptions": {
+		"target": "ES2023",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"strict": true,
+		"skipLibCheck": true,
+		"declaration": true,
+		"outDir": "dist",
+		"rootDir": ".",
+		"rewriteRelativeImportExtensions": true,
+		"verbatimModuleSyntax": true
+	},
+	"include": ["index.ts", "tool.ts", "execute.ts", "execute.lazy.ts", "renderer.ts", "search.ts", "utilities.ts"]
+}

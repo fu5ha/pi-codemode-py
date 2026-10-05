@@ -1,2 +1,2 @@
-/** Loads the codemode sandbox runtime on the first script (see execute.ts). */
+/** Loads the Python runtime adapter on the first script. */
 export const loadCodemodeExecutor = () => import("./execute.ts");

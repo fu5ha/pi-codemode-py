@@ -24,7 +24,13 @@ possible, but differs in the key choice to have the execution environment not be
 just run a trusted script using system python. `store` and `load` also save native python values using the 
 python-native pickle format instead of json, but most other uses of json stay.
 
-The examples and behavior below describe the intended Python execution interface; the host API remains TypeScript. These are accepted design decisions, not verified implementation behavior.
+The host API remains TypeScript. Requires Node.js 22.19+ and `python3` 3.12+ on PATH.
+
+Install dependencies and build with `npm ci` at the repository root. Add `+codemode` to Pi's
+`defaultTools` setting and load the local package with `pi -e .`. Avoid `--tools codemode`: that
+allowlist also excludes the other tools from nested calls.
+The extension replaces Pi's bundled `codemode` tool and is registered inactive, like the bundled version.
+The installable adapter package is `@fu5ha/pi-codemode-py-extension`.
 
 ## Usage
 
@@ -116,7 +122,7 @@ Both are also available from the lightweight `@fu5ha/pi-codemode-py/source` entr
 
 ## Declarations for the model
 
-Tools and globals can carry `description`, `inputSchema`, and `outputSchema` (JSON Schema). `renderDeclarations()` should generate Python-facing signatures and type hints instead of TypeScript declarations, for example:
+Tools and globals can carry `description`, `inputSchema`, and `outputSchema` (JSON Schema). `renderDeclarations()` generates Python-facing signatures and type hints instead of TypeScript declarations, for example:
 
 ```ts
 renderDeclarations({ tools: env.tools, globals: env.globals });
@@ -134,7 +140,7 @@ class Tools:
         ...
 ```
 
-Schemas only shape the declarations; values are not validated against them. Local references (`#/$defs/...`, `#/definitions/...`) are expanded; recursive and remote references render as `Any` from `typing`. The signature above illustrates the intended output, not a verified renderer result.
+Schemas only shape the declarations; values are not validated against them. Local references (`#/$defs/...`, `#/definitions/...`) are expanded; recursive and remote references render as `Any` from `typing`. The example illustrates the shape; actual output uses deterministic functional `TypedDict` definitions.
 
 ## Using with pi-agent-core
 
@@ -201,11 +207,11 @@ Async tool wrappers start calls only when awaited or scheduled, following normal
 
 ## How it works
 
-Each `execute()` starts a worker execution environment. The execution environment uses system python, and is
+Each `execute()` starts a Python process. The execution environment uses system python, and is
 intentionally not sandboxed.
 
 The script is compiled as an async Python function body with access to `tools` and the helper functions. Use `codemode.py` as the compile filename and adjust wrapper line offsets so tracebacks match the submitted source.
 
 Each execution uses a separate Python process with a dedicated framed JSON IPC channel for tool requests/results and pickle only for store values. Process isolation keeps blocking Python work off the host and permits hard termination, at the cost of process startup overhead. On timeout or abort, the host cancels tool calls and terminates the process tree, escalating to a forced kill after a short grace period. Descendants are managed through POSIX process groups or Windows Job Objects as appropriate. This is lifecycle management, not a security sandbox.
 
-The worker keeps script execution off the host thread: a spinning script should not block the host.
+The process keeps script execution off the host thread: a spinning script does not block the host.

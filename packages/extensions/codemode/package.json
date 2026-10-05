@@ -1,0 +1,40 @@
+{
+	"name": "@fu5ha/pi-codemode-py-extension",
+	"version": "1.0.2",
+	"description": "Trusted Python codemode extension for Pi",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": "./dist/index.js",
+		"./tool": "./dist/tool.js"
+	},
+	"files": ["dist"],
+	"keywords": ["pi-package", "pi", "codemode", "python"],
+	"license": "MIT",
+	"engines": { "node": ">=22.19.0" },
+	"pi": { "extensions": ["./dist/index.js"] },
+	"dependencies": { "@fu5ha/pi-codemode-py": "1.0.2" },
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-coding-agent": ">=1.0.2 <2",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "1.0.2",
+		"@earendil-works/pi-agent-core": "1.0.2",
+		"@earendil-works/pi-coding-agent": "1.0.2",
+		"@earendil-works/pi-tui": "1.0.2",
+		"typebox": "^1.1.24",
+		"@types/node": "22.19.19",
+		"typescript": "7.0.2",
+		"vitest": "4.1.11"
+	},
+	"scripts": {
+		"build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\" && tsc -p tsconfig.build.json",
+		"test": "npm run build && vitest --run",
+		"prepack": "npm run build"
+	}
+}

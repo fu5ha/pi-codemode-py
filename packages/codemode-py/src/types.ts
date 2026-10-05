@@ -91,6 +91,8 @@ export type CodemodeResult =
 	| { ok: false; error: CodemodeError; output: CodemodeOutputItem[]; calls: CodemodeCall[] };
 
 export interface CodemodeExecutionEnvOptions {
+	/** Working directory for Python and its subprocesses. Defaults to the host working directory. */
+	cwd?: string;
 	tools?: CodemodeTool[];
 	/**
 	 * Functions exposed as top-level identifiers instead of on `tools`, for host helpers such as

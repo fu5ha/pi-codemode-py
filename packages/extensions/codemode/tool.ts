@@ -1,7 +1,7 @@
 /**
- * The `codemode` tool: the model writes JavaScript that calls other tools. Scripts use `tools`,
- * `ALL_TOOLS`, `text()`, `image()`, `exit()`, `store()`/`load()`, `console.*`, and `return <value>`,
- * may start with a `// @options:` line, and reach the model catalog, classifiers, and image models
+ * The `codemode` tool: the model writes Python that calls other tools. Scripts use `tools`,
+ * `ALL_TOOLS`, `text()`, `image()`, `exit()`, `store()`/`load()`, `print()`, and `return <value>`,
+ * may start with a `# @options:` line, and reach the model catalog, classifiers, and image models
  * through `models.*`. Results start with a "Script completed" or "Script failed" header.
  *
  * Scripts can call the agent loop's nested tools: active `direct` tools and every `codemode` or
@@ -16,44 +16,44 @@
  * - A failed, blocked, or invalid call rejects with an Error carrying the tool's error text.
  *
  * A script that fails returns a normal error result that keeps its partial output, followed by
- * "Script error:" and the error. `store(key, value)` and `load(key)` keep JSON values across
- * calls; successful scripts append their writes to the session as `codemode-store` custom entries,
+ * "Script error:" and the error. `store(key, value)` and `load(key)` keep pickle values across
+ * calls; successful scripts append base64 writes to versioned `codemode-py-store` custom entries,
  * so each branch sees the values written on its own path.
  */
 
-import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { CodemodeJsonSchema, CodemodeTool } from "@earendil-works/pi-codemode";
+import type { CodemodeJsonSchema, CodemodeTool } from "@fu5ha/pi-codemode-py";
 import {
-	MCP_TYPESCRIPT_PREAMBLE,
+	MCP_PYTHON_PREAMBLE,
 	mcpStructuredContentSchema,
 	renderToolOutputType,
 	renderToolSample,
 	toCodemodeIdentifier,
-} from "@earendil-works/pi-codemode/declarations";
-import { CODEMODE_SOURCE_GRAMMAR } from "@earendil-works/pi-codemode/source";
+} from "@fu5ha/pi-codemode-py/declarations";
+import { CODEMODE_SOURCE_GRAMMAR } from "@fu5ha/pi-codemode-py/source";
 import { type Static, Type } from "typebox";
-import { getDocsPath } from "../../config.ts";
 import type {
 	ToolDefinition,
 	ToolInfo,
 	ToolLoadout,
 	ToolLoadoutChanges,
 	ToolNamespace,
-} from "../../core/extensions/types.ts";
-import type { ModelRegistry } from "../../core/model-registry.ts";
-import type { CodemodeMode } from "../../core/settings-manager.ts";
-import { wrapToolDefinition } from "../../core/tools/tool-definition-wrapper.ts";
+} from "@earendil-works/pi-coding-agent";
+import type { ModelRegistry, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { loadCodemodeExecutor } from "./execute.lazy.ts";
 import { codemodeRenderers } from "./renderer.ts";
 
 export const CODEMODE_TOOL_NAME = "codemode";
 
 /** Custom entry type holding one script's `store()` writes: {@link CodemodeStoreEntryData}. */
-export const CODEMODE_STORE_ENTRY_TYPE = "codemode-store";
+export const CODEMODE_STORE_ENTRY_TYPE = "codemode-py-store";
+
+export type CodemodeMode = "on" | "only";
 
 export interface CodemodeStoreEntryData {
-	set: Record<string, unknown>;
+	version: 1;
+	encoding: "pickle-base64";
+	set: Record<string, string>;
 	delete: string[];
 }
 
@@ -86,7 +86,7 @@ const TEXT_OUTPUT_SCHEMA: CodemodeJsonSchema = { type: "string" };
 
 export const codemodeSchema = Type.Object({
 	code: Type.String({
-		description: "Raw JavaScript source.",
+		description: "Raw Python source.",
 	}),
 });
 
@@ -123,29 +123,30 @@ export interface CodemodeToolDetails {
 }
 
 export const codemodeToolSystemPromptContribution = {
-	snippet: "Run JavaScript that calls other tools",
+	snippet: "Run trusted Python that calls other tools",
 	guidelines: [
-		"Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.",
+		"Use codemode to batch independent tool calls with asyncio.gather(..., return_exceptions=True), chain them, or filter large output.",
 	],
 } as const;
 
 /** The reference for scripts: globals, tool results, `store()`, the `models` API, and limits. */
-export const CODEMODE_DOCS_PATH = join(getDocsPath(), "codemode.md");
+export const CODEMODE_DOCS_PATH = "the Python interface described in this tool";
 
-const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
-- \`await tools.<name>({ ...args })\` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. Calls still running when the script ends are cancelled.
-- Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
+const DESCRIPTION_INTRO = `Run trusted, unsandboxed Python using python3 (3.12+). Input is raw Python (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. Standard libraries, filesystem, network, and timers are available.
+- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError. Exact-name lookup: \`tools["original-name"]\`. Calls still running when the script ends are cancelled; side effects are not undone.
+- Injected host functions accept positional arguments only, not Python keyword arguments. Pass tool arguments and helper options as dictionaries.
+- Optional first line: \`# @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
 function describeGlobals(models: boolean): string {
 	const lines = [
 		"Globals:",
-		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. `image()` also saves the image to a temp file and the result names its path.",
-		"- `store(key, value)` and `load(key)` keep JSON values across codemode calls.",
-		"- `ALL_TOOLS`, `searchTools(query, { limit?, namespace? })`, `describeTool(name)`, `describeNamespace(name)`: find unlisted tools, such as MCP tools.",
+		"- `text(value)`, `image(dataUrlOrImageBlock)`, and `print(...)` add output; `exit()` ends the script. Returns must be JSON-compatible; top-level None becomes {}. text() falls back to repr(). image() accepts base64 data URLs or image blocks and saves them to a temp file.",
+		"- `store(key, value)` and `load(key)` keep native Python pickle values across successful calls on the current session branch. load() returns a copy; missing keys return None; store(key, None) deletes. Limits: 256 KiB per serialized value, 2 MiB total before base64.",
+		"- `ALL_TOOLS`, `await searchTools(query, {\"limit\": 8, \"namespace\": \"name\"})`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools. Returned names are callable Python aliases; use `getattr(tools, entry[\"name\"])(args)` for dynamic calls. Bracket lookup uses the original tool name.",
 	];
 	if (models) {
-		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);
+		lines.push(`- \`models\`: all functions are awaited and positional-only. getModelsOfType(type, provider), getAvailableOfType(type, provider), getModelOfType(type, provider, id); provider can be omitted or passed as None positionally for the first two, e.g. \`await models.getModelsOfType("image", None)\`. type is "chat", "classifier", or "image". classify(model, {"state": {...}, "questions": {"id": {"type": "bool", "instructions": "...", "criteria": {"true": "...", "false": "..."}}}}) returns answers by ID; choice criteria map labels to meanings; score criteria list levels. generateImages(model, {"input": [{"type": "text", "text": "..."}]}) returns output blocks: show image blocks with image(block). Model is a catalog entry or {"provider": "...", "id": "..."}. Check result["stopReason"] ("stop", "error", "aborted") and errorMessage. At most four classify/image calls run concurrently. Usage contributes to session totals.`);
 	}
 	return lines.join("\n");
 }
@@ -262,7 +263,7 @@ export function createCodemodeDescription(
 				shown.has(declaration.name) && mcpStructuredContentSchema(declaration.outputSchema) !== undefined,
 		)
 	) {
-		sections.push(`Shared MCP Types:\n\`\`\`ts\n${MCP_TYPESCRIPT_PREAMBLE}\n\`\`\``);
+		sections.push(`Shared MCP Types:\n\`\`\`python\n${MCP_PYTHON_PREAMBLE}\n\`\`\``);
 	}
 	if (declarations.length === 0) return sections.join("\n\n");
 
@@ -292,7 +293,7 @@ export function createCodemodeDescription(
  */
 function describeOutput(schema: CodemodeJsonSchema | undefined): string {
 	const type = renderToolOutputType(schema);
-	if (type === "string") return "a string";
+	if (type === "str") return "a string";
 	const object = typeof schema === "object" ? schema : undefined;
 	const properties = object?.properties;
 	if (
@@ -313,7 +314,7 @@ function describeOutput(schema: CodemodeJsonSchema | undefined): string {
  * arguments are the tool's declared parameters, so they are not repeated.
  */
 function describeScriptCall(tool: AgentTool<any>): string {
-	return `${tool.description.trim()}\n\nCodemode: \`tools.${toCodemodeIdentifier(tool.name)}(args)\` resolves to ${describeOutput(toCodemodeDeclaration(tool).outputSchema)}.`;
+	return `${tool.description.trim()}\n\nCodemode: \`await tools.${toCodemodeIdentifier(tool.name)}(args)\` returns ${describeOutput(toCodemodeDeclaration(tool).outputSchema)}.`;
 }
 
 /**
@@ -375,10 +376,11 @@ export function createCodemodeToolDefinition(
 		parameters: codemodeSchema,
 		// Scripts must not start other scripts.
 		exposure: "model-only",
+		executionMode: "sequential",
 		prepareLoadout: (loadout) => prepareCodemodeLoadout(loadout, options),
 		// Capable models write the script as raw text instead of a JSON-escaped string.
 		constrainedSampling: { type: "grammar", variants: { openai_lark: CODEMODE_SOURCE_GRAMMAR } },
-		// The sandbox (worker, QuickJS wasm) loads on the first call, not at startup.
+		// Python runtime code loads on the first call; no process starts at extension load time.
 		execute: async (toolCallId, params, signal, onUpdate, ctx) =>
 			(await loadCodemodeExecutor()).executeCodemode(toolCallId, params, signal, onUpdate, ctx, options),
 		...codemodeRenderers,
@@ -394,7 +396,17 @@ export function createCodemodeTool(
 	options: CodemodeToolOptions = {},
 ): AgentTool<typeof codemodeSchema> {
 	const definition = createCodemodeToolDefinition(options);
-	const tool = wrapToolDefinition(definition);
+	// Plain Agent calls have no Pi context: do not bypass Pi's nested-tool pipeline.
+	const tool: AgentTool<typeof codemodeSchema> = {
+		name: definition.name,
+		label: definition.label,
+		description: definition.description,
+		parameters: definition.parameters,
+		constrainedSampling: definition.constrainedSampling,
+		executionMode: definition.executionMode,
+		execute: (id, params, signal, onUpdate, ctx?: ExtensionToolContext) =>
+			definition.execute(id, params, signal, onUpdate, ctx as ExtensionToolContext),
+	};
 	Object.assign(tool, {
 		description: createCodemodeDescription(tools, { models: options.models === true }),
 		promptSnippet: definition.promptSnippet,
