@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-codemode-py · Implementation notes</title>
+<style>
+  :root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
+  body { max-width: 850px; margin: 3rem auto; padding: 0 1.25rem 3rem; }
+  h1, h2, h3 { line-height: 1.2; }
+  h1 { letter-spacing: -.04em; font-size: 2.6rem; margin-bottom: .5rem; }
+  h2 { margin-top: 2.4rem; }
+  h3 { margin-bottom: .5rem; }
+  p, ul { margin-top: .5rem; }
+  code { font-size: .9em; overflow-wrap: anywhere; }
+  .muted { opacity: .7; }
+  .status { border-left: 4px solid #31947a; padding: .6rem 1rem; background: #31947a12; }
+  article { border-top: 1px solid #8884; padding: .8rem 0; }
+  li { margin-bottom: .4rem; }
+  footer { border-top: 1px solid #8884; margin-top: 2.5rem; padding-top: 1rem; }
+</style>
+<header>
+  <p class="muted">Implementation record · 5 October 2026</p>
+  <h1>Python codemode, implemented.</h1>
+  <p>The upstream extension became a standalone runtime and a public-API Pi adapter.
+    Four sequential implementation changes each received independent review and a fix pass.</p>
+  <p class="status"><strong>Final verification:</strong> 65 tests pass on Windows and WSL/Linux:
+    54 runtime tests and 11 adapter tests. Both packages build; packaging dry-runs,
+    adapter-test typechecking, and dependency audit pass.</p>
+</header>
+<main>
+  <h2>What happened</h2>
+  <p>The runtime and bundled extension were imported byte-for-byte from
+    <code>earendil-works/pi</code> at <code>b2b5c42f6138b73ec4b2f49ec0ca468800f88586</code>,
+    preserving the project README, then arranged under <code>packages/</code>.</p>
+  <article>
+    <h3>1 · Standalone build <small class="muted"><code>ypztluks / ad6ac00c</code></small></h3>
+    <p>Named the runtime <code>@fu5ha/pi-codemode-py</code>, supplied its own TypeScript
+      configuration and direct build dependencies, and added reproducible installation.</p>
+    <p><strong>Review fixes:</strong> include source files for the source export condition;
+      build during <code>prepack</code>, including local tarball creation.
+      Native Node cleanup replaced <code>shx</code> after its dependency tree introduced audit findings.
+      QuickJS removal and adapter metadata deliberately waited for their implementation stages.</p>
+  </article>
+  <article>
+    <h3>2 · Python runtime <small class="muted"><code>lwwonzqt / aa54e48b</code></small></h3>
+    <p>Replaced QuickJS/WASM workers with a fresh <code>python3 -u -c</code> process per
+      execution. Editable Python files generate deterministic embedded TypeScript strings;
+      execution needs neither temporary runner files nor asset lookup.</p>
+    <p><strong>Review fixes:</strong> an AST-based async wrapper preserves multiline literals
+      and source locations; completion no longer waits on potentially blocking cancellation
+      handlers; POSIX bridge loss terminates the original process group, not just the runner.</p>
+    <p>Windows Job Object cleanup was implemented in Python using <code>ctypes</code>.
+      WSL supplied actual POSIX and minimum-Python-version verification, rather than
+      relying solely on static review.</p>
+  </article>
+  <article>
+    <h3>3 · Python-facing interface <small class="muted"><code>munrztlv / 70c4d3da</code></small></h3>
+    <p>Ported <code># @options:</code>, shared safe aliases and registration validation,
+      and Python declarations with functional <code>TypedDict</code> shapes, MCP types,
+      reference expansion and size budgets.</p>
+    <p><strong>Review fix:</strong> generated annotation imports receive collision-safe
+      aliases when accepted globals or tool namespaces shadow builtin or typing names.
+      Validation resolves actual Python type hints, not just textual snapshots.</p>
+  </article>
+  <article>
+    <h3>4 · Pi integration <small class="muted"><code>oxxoqxzv / 5169523b</code></small></h3>
+    <p>Added root npm workspaces and <code>@fu5ha/pi-codemode-py-extension</code>.
+      Pi 1.0.2 exposes the needed APIs: nested calls use <code>ctx.executeTool()</code>,
+      preserving validation, hooks, permissions and parent IDs. Discovery, loadout modes,
+      model helpers, cost reporting, persistence, rendering, truncation and images were ported.</p>
+    <p><strong>Review fixes:</strong> README activation no longer recommends the restrictive
+      <code>--tools codemode</code> allowlist; model helpers are documented as positional-only;
+      the coding-agent peer range requires <code>&gt;=1.0.2 &lt;2</code>.</p>
+  </article>
+
+  <h2>Important implementation choices</h2>
+  <ul>
+    <li><strong>Trusted, unsandboxed execution.</strong> Requires Node 22.19+ and Python
+      3.12+ on PATH. Ordinary filesystem, networking and Python libraries are available.
+      <code>CodemodeExecutionEnv</code> replaces the old name, with a deprecated
+      <code>CodemodeSandbox</code> compatibility alias.</li>
+    <li><strong>Portable IPC.</strong> Authenticated loopback TCP carries length-prefixed JSON,
+      separate from stdout/stderr. Windows inherited-descriptor differences motivated this
+      choice. A 64 MiB frame ceiling bounds transport; oversized frames are execution errors.</li>
+    <li><strong>Native persistence.</strong> Runtime store values are opaque
+      <code>Uint8Array</code> pickle bytes, base64-encoded throughout IPC and versioned
+      <code>codemode-py-store</code> session entries. Limits are <strong>256 KiB per value
+      and 2 MiB total</strong>, measured as raw serialized pickle bytes. Failed scripts
+      publish no writes; load returns a copy; storing <code>None</code> deletes.</li>
+    <li><strong>Returns versus output.</strong> Returns must be JSON-compatible:
+      top-level <code>None</code> becomes <code>{}</code>, nested <code>None</code> becomes
+      JSON null, and unsupported values raise a script error. <code>text()</code> retains
+      its <code>repr()</code> fallback.</li>
+    <li><strong>Host-owned completion.</strong> Windows could reset the socket before large
+      terminal store frames arrived. The runner now remains alive after sending completion,
+      and the host terminates it after consuming the result. Background tasks are cancelled
+      but their finalizers are not awaited: an event loop cannot bound a synchronously blocking
+      finalizer. Host calls are aborted and process cleanup supplies the independent bound.</li>
+    <li><strong>Process trees.</strong> POSIX uses detached process groups with escalation;
+      Windows uses kill-on-close Job Objects established before user code. Job setup failure
+      fails startup instead of falling back to unreliable descendant killing. Bridge-loss
+      cleanup covers abrupt host death.</li>
+    <li><strong>Declarations are complete snippets.</strong> Keep imports and supporting types,
+      not just the signature line. Separate snippets containing future imports cannot simply
+      be concatenated. Multi-part <code>allOf</code> falls back to <code>Any</code>; JSON arrays
+      remain lists; Python 3.12 cannot precisely type extra <code>TypedDict</code> keys.
+      ASCII aliases handle hard keywords, while soft keywords remain valid identifiers.</li>
+    <li><strong>Adapter details.</strong> Injected host functions take positional arguments;
+      use dictionaries for options, not Python keyword arguments. Discovery aliases use
+      <code>getattr(tools, entry["name"])</code>; brackets address original names.
+      Executions are serialized to protect branch-sensitive store updates. Runtime
+      <code>cwd</code> follows the SDK session workspace.</li>
+    <li><strong>Small local utilities.</strong> Search, usage aggregation, temporary output
+      and preview helpers replace unavailable private Pi imports. Model calls retain a
+      four-call concurrency limit and check cancellation before leaving the queue.
+      Spill files intentionally survive so subsequent tools can retrieve them.</li>
+  </ul>
+
+  <h2>Verification and test restraint</h2>
+  <p>The existing harness was ported where its intent still applied. VM isolation, frozen
+    namespaces, WASM assets, JavaScript stack/throw behavior and stalled-promise tests were
+    discarded. Python calls start when awaited or scheduled, not merely when a coroutine
+    object is created.</p>
+  <p>New tests were restricted to complex regressions: cancellation-resistant tasks,
+    a real process-tree lifecycle matrix, multiline-literal preservation, and executable
+    generated declarations with reference budgets and annotation shadowing. Adapter scenarios
+    were ported and consolidated rather than multiplied.</p>
+  <ul>
+    <li><strong>Final assembled build/tests:</strong> Windows, Node 25.9 / Python 3.13.14;
+      WSL Ubuntu 24.04, Node 22.19 / Python 3.12.3. All 65 tests pass on each.</li>
+    <li><strong>Lifecycle coverage:</strong> actual descendants on success, timeout, abort,
+      runner crash and external host death, including Windows handle-inheritance challenges.
+      POSIX zombie processes count as terminated, not live descendants.</li>
+    <li><strong>Adapter coverage:</strong> real Pi resource loader and compiled extension,
+      builtin replacement, hooks, permissions, branch persistence, model credentials,
+      concurrency/costs, loadouts, truncation and saved images. Model responses are
+      controlled by the harness, not evidence of live-provider compatibility.</li>
+    <li><strong>Packaging:</strong> both package dry-runs succeed; adapter-test strict
+      typechecking passes; current dependency audit reports zero vulnerabilities.
+      Prior implementation/review also verified clean root installation.</li>
+  </ul>
+
+  <h2>Boundaries and next-use notes</h2>
+  <p>Lifecycle management is <strong>not hostile-code containment</strong>. Trusted scripts
+    can deliberately escape ordinary POSIX groups or tamper with runtime internals.
+    Cancellation cannot undo remote side effects, and async finalizers are not guaranteed
+    to finish. Pickle data must be trusted; it is not a safe interchange format for
+    untrusted session input.</p>
+  <p>Publish the runtime before its adapter dependency. For local use, run
+    <code>npm ci</code>, add <code>+codemode</code> to Pi's <code>defaultTools</code>,
+    and load with <code>pi -e .</code>. Using <code>--tools codemode</code> also removes
+    ordinary tools from nested availability. Verified host APIs are Pi 1.0.2;
+    future allowed versions were not individually tested.</p>
+</main>
+<footer class="muted">A single self-contained page: no scripts, external assets or dependencies.
+  Source of truth: repository changes and implementation/review reports.</footer>
+</html>
