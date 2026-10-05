@@ -209,11 +209,17 @@ describe("tools", () => {
 		const env = createEnv([
 			{ name: "my-tool", description: "Dashes", execute: () => "dash" },
 			{ name: "mcp__docs__search", execute: () => "mcp" },
+			{ name: "1tool", execute: () => "digit" },
+			{ name: "class", execute: () => "keyword" },
+			{ name: "$tool", execute: () => "dollar" },
 		]);
-		expect(await env.execute("return {'all': ALL_TOOLS, 'calls': [await tools.my_tool(), await tools['my-tool'](), await tools.mcp__docs__search()]}"))
+		expect(await env.execute("return {'all': ALL_TOOLS, 'calls': [await tools.my_tool(), await tools['my-tool'](), await tools.mcp__docs__search(), await tools._1tool(), await tools.class_(), await tools['class'](), await tools._tool()]}"))
 			.toMatchObject({ ok: true, value: {
-				all: [{ name: "my_tool", description: "Dashes" }, { name: "mcp__docs__search", description: "" }],
-				calls: ["dash", "dash", "mcp"],
+				all: [
+					{ name: "my_tool", description: "Dashes" }, { name: "mcp__docs__search", description: "" },
+					{ name: "_1tool", description: "" }, { name: "class_", description: "" }, { name: "_tool", description: "" },
+				],
+				calls: ["dash", "dash", "mcp", "digit", "keyword", "keyword", "dollar"],
 			} });
 	});
 
@@ -257,6 +263,15 @@ describe("tools", () => {
 		const env = createEnv();
 		env.registerTool(echo);
 		expect(() => env.registerTool(echo)).toThrow(/already registered/);
+		for (const name of ["_exact", "_aliases", "__dict__", "__getitem__", "__class__"]) {
+			expect(() => env.registerTool({ name, execute: () => "" })).toThrow(/reserved namespace/);
+		}
+		env.registerTool({ name: "foo-bar", execute: () => "first" });
+		expect(() => env.registerTool({ name: "foo_bar", execute: () => "second" })).toThrow(/alias.*conflicts/);
+		expect(env.unregisterTool("foo-bar")).toBe(true);
+		env.registerTool({ name: "foo_bar", execute: () => "second" });
+		expect(await env.execute("return await tools.foo_bar()")).toMatchObject({ ok: true, value: "second" });
+		env.unregisterTool("foo_bar");
 		expect(env.tools.map((tool) => tool.name)).toEqual(["echo"]);
 		expect(await env.execute("return await tools.echo('a')")).toMatchObject({ ok: true, value: "a" });
 		expect(env.unregisterTool("echo")).toBe(true);
@@ -356,7 +371,7 @@ describe("globals", () => {
 
 	it("rejects invalid, reserved, and conflicting global names", () => {
 		const execute = () => undefined;
-		for (const name of ["a.b.c", "a.", ".a", "tools.x", "store.x", "a.not-valid", "not-valid", "tools", "store", "load"]) {
+		for (const name of ["a.b.c", "a.", ".a", "tools.x", "store.x", "a.not-valid", "not-valid", "tools", "store", "load", "class", "models.for", "models.__dict__", "__class__.x", "image.member"]) {
 			expect(() => new CodemodeExecutionEnv({ globals: [{ name, execute }] }), name).toThrow(/Invalid global/);
 		}
 		expect(() => new CodemodeExecutionEnv({ globals: [{ name: "models", execute }, { name: "models.list", execute }] })).toThrow(/conflicts with the namespace/);

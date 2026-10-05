@@ -1,6 +1,6 @@
 export {
 	DEFAULT_INPUT_SCHEMA_MAX_CHARS,
-	MCP_TYPESCRIPT_PREAMBLE,
+	MCP_PYTHON_PREAMBLE,
 	mcpStructuredContentSchema,
 	type RenderDeclarationsOptions,
 	renderDeclarations,

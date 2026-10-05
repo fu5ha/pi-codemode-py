@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
-import { toCodemodeIdentifier } from "../identifier.ts";
+import { toCodemodeIdentifier, validateGlobalNames, validateToolNames } from "../identifier.ts";
 import type {
 	CodemodeCall, CodemodeError, CodemodeExecuteOptions, CodemodeOutputItem, CodemodeResult,
 	CodemodeExecutionEnvOptions, CodemodeStoreWrites, CodemodeTool,
@@ -11,8 +11,6 @@ import type { HostToPythonMessage, PythonToHostMessage } from "./protocol.ts";
 import { BOOTSTRAP_SOURCE, RUNNER_SOURCE } from "./python-source.ts";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
-const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const RESERVED_GLOBALS = new Set(["tools", "ALL_TOOLS", "text", "exit", "store", "load", "__builtins__", "__codemode_main__"]);
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -361,19 +359,14 @@ export class CodemodeExecutionEnv {
 	constructor(options: CodemodeExecutionEnvOptions = {}) {
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		for (const tool of options.tools ?? []) this.registerTool(tool);
-		const namespaces = new Set<string>();
+		validateGlobalNames(options.globals ?? []);
 		for (const global of options.globals ?? []) {
-			const parts = global.name.split(".");
-			if (parts.length > 2 || !parts.every((part) => IDENTIFIER.test(part)) || RESERVED_GLOBALS.has(parts[0])) throw new Error(`Invalid global name "${global.name}"`);
-			if (this.globalsByName.has(global.name)) throw new Error(`Global "${global.name}" is already registered`);
-			if (parts.length === 2) namespaces.add(parts[0]);
 			this.globalsByName.set(global.name, global);
 		}
-		for (const name of namespaces) if (this.globalsByName.has(name)) throw new Error(`Global "${name}" conflicts with the namespace "${name}"`);
 	}
 
 	registerTool(tool: CodemodeTool): void {
-		if (this.toolsByName.has(tool.name)) throw new Error(`Tool "${tool.name}" is already registered`);
+		validateToolNames([...this.toolsByName.values(), tool]);
 		this.toolsByName.set(tool.name, tool);
 	}
 

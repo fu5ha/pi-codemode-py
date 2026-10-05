@@ -14,26 +14,29 @@ export interface CodemodeTool {
 	 * The script calls tools as `tools.<id>(args)`, where `<id>` is the name with characters that
 	 * are not valid in identifiers replaced by `_` (see `toCodemodeIdentifier`), and also as
 	 * `tools["<name>"](args)`. Globals are called as `<name>(args)` and must be identifiers, or
-	 * `<namespace>.<member>`, which groups them into a frozen namespace object.
+	 * `<namespace>.<member>`, which groups them into an ordinary Python namespace.
+	 * Aliases preserve leading digits with a prefix, suffix Python keywords, and reject collisions
+	 * or reserved namespace attributes at registration.
 	 */
 	name: string;
-	/** Shown as a doc comment in {@link renderDeclarations}, and listed in `ALL_TOOLS` for tools. */
+	/** Shown as a Python docstring in {@link renderDeclarations}, and listed in `ALL_TOOLS` for tools. */
 	description?: string;
-	/** Schema of the single argument. Rendered as the parameter type; `unknown` when omitted. */
+	/** Schema of the single argument. Rendered as the parameter type; `Any` when omitted. */
 	inputSchema?: CodemodeJsonSchema;
-	/** Schema of the resolved value. Rendered as the promise type; `unknown` when omitted. */
+	/** Schema of the resolved value. Rendered as the async function return type; `Any` when omitted. */
 	outputSchema?: CodemodeJsonSchema;
 	/** Globals only: `execute` receives all call arguments as an array instead of the first one. */
 	spread?: boolean;
 	/**
-	 * Globals only: TypeScript parameter list and return type for {@link renderDeclarations}, for
-	 * example `(type: string, id?: string): Promise<Model[]>`. Replaces the rendering from the schemas.
+	 * Globals only: Python parameter list and return annotation for {@link renderDeclarations}, for
+	 * example `(kind: str, id: str | None = None) -> list[dict[str, Any]]`.
+	 * Replaces the rendering from the schemas, without `async def` or a trailing colon.
 	 */
 	signature?: string;
 	/**
 	 * `args` is whatever the script passed, after a JSON round trip. The return
 	 * value must be JSON-serializable; a thrown error surfaces in the script as
-	 * an `Error` with the same message.
+	 * a Python `RuntimeError` with the same message.
 	 */
 	execute(args: unknown, context: CodemodeToolContext): Promise<unknown> | unknown;
 }
@@ -92,7 +95,7 @@ export interface CodemodeExecutionEnvOptions {
 	/**
 	 * Functions exposed as top-level identifiers instead of on `tools`, for host helpers such as
 	 * attaching an image to the result. They behave like tools (JSON round trip, promise result)
-	 * but are not recorded in `result.calls`. Names must be identifiers and may not shadow the
+	 * but are not recorded in `result.calls`. Names must be Python identifiers and may not shadow the
 	 * built-in globals (`tools`, `ALL_TOOLS`, `text`, `exit`, `store`, `load`).
 	 * A host `image` global can replace the built-in image helper.
 	 */
@@ -110,7 +113,7 @@ export type CodemodeSandboxOptions = CodemodeExecutionEnvOptions;
 
 export interface CodemodeExecuteOptions {
 	signal?: AbortSignal;
-	/** Overrides the sandbox default for this execution. */
+	/** Overrides the environment default for this execution. */
 	timeoutMs?: number;
 	/**
 	 * Opaque serialized pickle bytes the script reads with `load(key)`. The script's own

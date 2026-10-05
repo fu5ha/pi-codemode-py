@@ -1,14 +1,14 @@
 /**
- * Codemode source format: JavaScript, optionally preceded by one options line.
+ * Codemode source format: Python, optionally preceded by one options line.
  *
- * ```js
- * // @options: {"max_output_tokens": 2000, "timeout_ms": 30000}
- * const text = await tools.read({ path: "package.json" });
- * text(JSON.parse(text).name);
+ * ```python
+ * # @options: {"max_output_tokens": 2000, "timeout_ms": 30000}
+ * source = await tools.read({"path": "package.json"})
+ * text(source)
  * ```
  */
 
-export const CODEMODE_OPTIONS_PREFIX = "// @options:";
+export const CODEMODE_OPTIONS_PREFIX = "# @options:";
 
 const SUPPORTED_FIELDS = ["max_output_tokens", "timeout_ms"] as const;
 const SUPPORTED_FIELDS_TEXT = "`max_output_tokens` and `timeout_ms`";
@@ -24,7 +24,7 @@ start: options_source | plain_source
 options_source: OPTIONS_LINE NEWLINE SOURCE
 plain_source: SOURCE
 
-OPTIONS_LINE: /[ \t]*\/\/ @options:[^\r\n]*/
+OPTIONS_LINE: /[ \t]*# @options:[^\r\n]*/
 NEWLINE: /\r?\n/
 SOURCE: /[\s\S]+/
 `;
@@ -94,22 +94,22 @@ function parseOptions(directive: string): CodemodeSourceOptions {
 }
 
 /**
- * Split an optional first-line `// @options: {...}` from the script. Throws
+ * Split an optional first-line `# @options: {...}` from the script. Throws
  * {@link CodemodeSourceError} for empty input and invalid options.
  */
 export function parseCodemodeSource(input: string): ParsedCodemodeSource {
 	if (input.trim() === "") {
 		throw new CodemodeSourceError(
-			'Expected JavaScript source text (non-empty). Provide JS only, optionally with a first line `// @options: {"max_output_tokens": 1000}`.',
+			'Expected Python source text (non-empty). Provide Python only, optionally with a first line `# @options: {"max_output_tokens": 1000}`.',
 		);
 	}
 	const newline = input.indexOf("\n");
 	const firstLine = (newline === -1 ? input : input.slice(0, newline)).replace(/\r$/, "");
-	const trimmed = firstLine.trimStart();
+	const trimmed = firstLine.replace(/^[ \t]*/, "");
 	if (!trimmed.startsWith(CODEMODE_OPTIONS_PREFIX)) return { code: input, options: {} };
 	const code = newline === -1 ? "" : input.slice(newline);
 	if (code.trim() === "") {
-		throw new CodemodeSourceError("The @options line must be followed by JavaScript source on subsequent lines");
+		throw new CodemodeSourceError("The @options line must be followed by Python source on subsequent lines");
 	}
 	return { code, options: parseOptions(trimmed.slice(CODEMODE_OPTIONS_PREFIX.length).trim()) };
 }
