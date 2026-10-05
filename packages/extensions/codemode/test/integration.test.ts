@@ -116,8 +116,8 @@ for args in [{"text": "blocked"}, {}]:
 		harness.manager.branch(firstWrite.id);
 		expect(resultText(await harness.run(increment))).toBe("2");
 		harness.manager.appendCustomEntry("codemode-store", { set: { count: 99 }, delete: [] });
-		expect(resultText(await harness.run('store("count", None)\nreturn load("count")'))).toBe("{}");
-		expect(resultText(await harness.run('return load("count")'))).toBe("{}");
+		expect(resultText(await harness.run('store("count", None)\nreturn load("count")'))).toBe("null");
+		expect(resultText(await harness.run('return load("count")'))).toBe("null");
 	});
 
 	it("enforces source deadlines and spills token-limited output while retaining images", async () => {

@@ -79,7 +79,7 @@ export interface CodemodeStoreWrites {
 	delete: string[];
 }
 
-/** Output is kept on failure. Top-level None/implicit return/exit() yield {}. */
+/** Output is kept on failure. Python None, implicit return, and exit() yield JSON null. */
 export type CodemodeResult =
 	| {
 			ok: true;

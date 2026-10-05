@@ -141,7 +141,7 @@ const DESCRIPTION_INTRO = `Run trusted, unsandboxed Python using python3 (3.12+)
 function describeGlobals(models: boolean): string {
 	const lines = [
 		"Globals:",
-		"- `text(value)`, `image(dataUrlOrImageBlock)`, and `print(...)` add output; `exit()` ends the script. Returns must be JSON-compatible; top-level None becomes {}. text() falls back to repr(). image() accepts base64 data URLs or image blocks and saves them to a temp file.",
+		"- `text(value)`, `image(dataUrlOrImageBlock)`, and `print(...)` add output; `exit()` ends the script. Returns must be JSON-compatible; None becomes JSON null at every level, including implicit returns and exit(). text() falls back to repr(). image() accepts base64 data URLs or image blocks and saves them to a temp file.",
 		"- `store(key, value)` and `load(key)` keep native Python pickle values across successful calls on the current session branch. load() returns a copy; missing keys return None; store(key, None) deletes. Limits: 256 KiB per serialized value, 2 MiB total before base64.",
 		"- `ALL_TOOLS`, `await searchTools(query, {\"limit\": 8, \"namespace\": \"name\"})`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools. Returned names are callable Python aliases; use `getattr(tools, entry[\"name\"])(args)` for dynamic calls. Bracket lookup uses the original tool name.",
 	];

@@ -192,6 +192,9 @@ const codemodeTool: AgentTool = {
 
 ## Results
 
+Return values must be JSON-compatible. Python `None`, including an implicit return or `exit()`,
+becomes JSON `null`, at the top level as well as inside containers.
+
 `execute()` never rejects for script failures. `result.error.kind` is one of:
 
 | kind      | meaning                                                                     |

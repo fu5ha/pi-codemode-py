@@ -114,7 +114,7 @@ def exit():
     # `except BaseException` cannot convert exit() into continued execution.
     sys.stdout.flush()
     sys.stderr.flush()
-    send_done({"type": "done", "ok": True, "value": {}, "writes": _writes})
+    send_done({"type": "done", "ok": True, "value": None, "writes": _writes})
     raise ScriptExit()
 
 
@@ -308,7 +308,7 @@ async def run():
             value = None
         # No repr fallback for returned values. Give a useful script error.
         try:
-            value = json.loads(json.dumps({} if value is None else value, allow_nan=False))
+            value = json.loads(json.dumps(value, allow_nan=False))
         except (TypeError, ValueError, OverflowError) as error:
             raise TypeError("return value is not JSON-serializable; explicitly convert it to JSON-compatible values") from error
         result = {"type": "done", "ok": True, "value": value, "writes": _writes}

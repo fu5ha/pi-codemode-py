@@ -38,14 +38,14 @@ describe("embedded sources", () => {
 });
 
 describe("script execution", () => {
-	it("returns JSON values, with top-level None mapped to an empty object", async () => {
+	it("returns JSON values, with None mapped to null at every level", async () => {
 		const env = createEnv();
 		expect(await env.execute("return {'a': 1, 'b': [True, 'x', None]}")).toMatchObject({
 			ok: true, value: { a: 1, b: [true, "x", null] }, output: [], calls: [],
 		});
 		expect(await env.execute("return 'plain'")).toMatchObject({ ok: true, value: "plain" });
-		expect(await env.execute("")).toMatchObject({ ok: true, value: {} });
-		expect(await env.execute("return None")).toMatchObject({ ok: true, value: {} });
+		expect(await env.execute("")).toMatchObject({ ok: true, value: null });
+		expect(await env.execute("return None")).toMatchObject({ ok: true, value: null });
 	});
 
 	it("supports top-level await and ordinary Python libraries/timers", async () => {
@@ -141,7 +141,7 @@ describe("script execution", () => {
 			    text("caught")
 			text("after")
 		`));
-		expect(result).toMatchObject({ ok: true, value: {}, output: [{ type: "text", text: "before" }] });
+		expect(result).toMatchObject({ ok: true, value: null, output: [{ type: "text", text: "before" }] });
 		if (result.ok) {
 			expect(result.storeWrites.set.k).toBeInstanceOf(Uint8Array);
 			expect(await env.execute("return load('k')", { store: result.storeWrites.set })).toMatchObject({ ok: true, value: 1 });

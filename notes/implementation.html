@@ -88,8 +88,8 @@
       and 2 MiB total</strong>, measured as raw serialized pickle bytes. Failed scripts
       publish no writes; load returns a copy; storing <code>None</code> deletes.</li>
     <li><strong>Returns versus output.</strong> Returns must be JSON-compatible:
-      top-level <code>None</code> becomes <code>{}</code>, nested <code>None</code> becomes
-      JSON null, and unsupported values raise a script error. <code>text()</code> retains
+      <code>None</code> becomes JSON null at every level, including implicit returns
+      and <code>exit()</code>, and unsupported values raise a script error. <code>text()</code> retains
       its <code>repr()</code> fallback.</li>
     <li><strong>Host-owned completion.</strong> Windows could reset the socket before large
       terminal store frames arrived. The runner now remains alive after sending completion,
