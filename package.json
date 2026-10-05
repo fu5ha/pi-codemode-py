@@ -1,6 +1,7 @@
 {
 	"name": "pi-codemode-py-workspace",
 	"private": true,
+	"license": "MIT",
 	"type": "module",
 	"workspaces": ["packages/codemode-py", "packages/extensions/codemode"],
 	"pi": { "extensions": ["packages/extensions/codemode/dist/index.js"] },
