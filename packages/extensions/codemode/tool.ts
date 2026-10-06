@@ -44,7 +44,7 @@ import type { ModelRegistry, ExtensionToolContext } from "@earendil-works/pi-cod
 import { loadCodemodeExecutor } from "./execute.lazy.ts";
 import { codemodeRenderers } from "./renderer.ts";
 
-export const CODEMODE_TOOL_NAME = "codemode";
+export const CODEMODE_TOOL_NAME = "exec_python";
 
 /** Custom entry type holding one script's `store()` writes: {@link CodemodeStoreEntryData}. */
 export const CODEMODE_STORE_ENTRY_TYPE = "codemode-py-store";
