@@ -6,6 +6,8 @@ The `exec_python` tool runs model-written Python that calls Pi's other tools and
 
 Input is raw Python source. It runs as the body of an async function and asyncio is automatically imported, so top-level `await`, asyncio combinators, etc. work.
 
+A final top-level expression that evaluates to a non-`None` value is shown using `text()` (including its `repr()` fallback), followed by a warning asking whether you intended to return it. It does not become the script's return value. Use explicit `return` or `text()` to make your intent clear. Expressions inside a final `if`, loop, or other compound statement are not automatically shown.
+
 ```python
 results = await asyncio.gather(
     tools.read({"path": "package.json"}),

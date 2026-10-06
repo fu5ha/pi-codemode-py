@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { registerFauxProvider, fauxAssistantMessage, fauxToolCall, getCurrentTools, getCurrentSystemPrompt } from "@earendil-works/pi-ai/compat";
 import {
 	createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
-	type ExtensionFactory, type ToolDefinition, type AgentSessionEvent, createCodemodeExtension as createBundledCodemodeExtension,
+	type ExtensionFactory, type ToolDefinition, type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { createCodemodeExtension } from "../index.ts";
+import { CODEMODE_TOOL_NAME } from "../tool.ts";
 
 export async function createHarness(options: {
 	factories?: ExtensionFactory[]; tools?: ToolDefinition<any>[]; mode?: "on" | "only";
@@ -28,7 +29,6 @@ export async function createHarness(options: {
 		cwd: tempDir, agentDir: tempDir, noSkills: true, noPromptTemplates: true, noThemes: true,
 		additionalExtensionPaths: options.mode ? [] : [fileURLToPath(new URL("../dist/index.js", import.meta.url))],
 		extensionFactories: [
-			{ name: "codemode", factory: createBundledCodemodeExtension(), builtin: true, replaceable: true },
 			...(options.mode ? [createCodemodeExtension({ mode: options.mode })] : []),
 			(pi) => { for (const tool of options.tools ?? []) pi.registerTool(tool); },
 			...(options.factories ?? []),
@@ -39,7 +39,7 @@ export async function createHarness(options: {
 	if (loaded.errors.length) throw new Error(JSON.stringify(loaded.errors));
 	const manager = SessionManager.inMemory(tempDir);
 	const settingsManager = SettingsManager.inMemory({
-		defaultTools: ["codemode", ...(options.tools ?? []).filter((tool) => !tool.exposure || tool.exposure === "direct").map((tool) => tool.name)],
+		defaultTools: [CODEMODE_TOOL_NAME, ...(options.tools ?? []).filter((tool) => !tool.exposure || tool.exposure === "direct").map((tool) => tool.name)],
 	});
 	const { session } = await createAgentSession({
 		cwd: tempDir, agentDir: tempDir, modelRuntime: runtime, model,
@@ -60,12 +60,12 @@ export async function createHarness(options: {
 				(context) => {
 					requestTools = getCurrentTools(context.messages).map((tool) => tool.name);
 					requestPrompt = getCurrentSystemPrompt(context.messages);
-					return fauxAssistantMessage([fauxToolCall("codemode", { code })], { stopReason: "toolUse" });
+					return fauxAssistantMessage([fauxToolCall(CODEMODE_TOOL_NAME, { code })], { stopReason: "toolUse" });
 				},
 				fauxAssistantMessage("done"),
 			]);
 			await session.prompt("go");
-			const result = session.messages.findLast((message) => message.role === "toolResult" && message.toolName === "codemode");
+			const result = session.messages.findLast((message) => message.role === "toolResult" && message.toolName === CODEMODE_TOOL_NAME);
 			if (!result || result.role !== "toolResult") throw new Error("No codemode result");
 			return result;
 		},

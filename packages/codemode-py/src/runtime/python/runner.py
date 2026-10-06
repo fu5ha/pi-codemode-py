@@ -319,6 +319,12 @@ def error_payload(error):
     })
 
 
+def show_trailing_expression(value):
+    if value is not None:
+        text(value)
+        text("Warning: the script ended with a non-None expression. Did you intend to return this value? Use an explicit return or text() to make your intent clear.")
+
+
 def compile_script(code, namespace):
     linecache.cache["codemode.py"] = (len(code), None, code.splitlines(keepends=True), "codemode.py")
     # ast.parse accepts await/return nodes at module scope; compile validates
@@ -326,6 +332,21 @@ def compile_script(code, namespace):
     # Unlike physical-line indentation, this preserves multiline literals and
     # all submitted source locations without traceback offset corrections.
     tree = ast.parse(code, filename="codemode.py")
+    if tree.body and isinstance(tree.body[-1], ast.Expr):
+        # Evaluate only the final top-level expression, once. Use text() rather
+        # than return-value serialization so arbitrary Python values are safe.
+        # Avoid names used by the script or injected globals.
+        helper_name = "__codemode_trailing_expression__"
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} | set(namespace)
+        while helper_name in names:
+            helper_name += "_"
+        namespace[helper_name] = show_trailing_expression
+        last = tree.body[-1]
+        tree.body[-1] = ast.copy_location(ast.Expr(value=ast.Call(
+            func=ast.Name(id=helper_name, ctx=ast.Load()),
+            args=[last.value],
+            keywords=[],
+        )), last)
     function = ast.AsyncFunctionDef(
         name="__codemode_main__",
         args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),

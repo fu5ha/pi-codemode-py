@@ -153,7 +153,7 @@ function describeGlobals(models: boolean): string {
 	const lines = [
 		"Globals:",
 		"- `text(value)`, `image(value)`, `print(...)`, and `return` add output; `exit()` ends the script.",
-		"- `store(key, value)` and `load(key)` keep native Python values (stored as serialized pickle) across successful calls on the current session branch, providing soft REPL-like capabilities.",
+		"- `store(key, value)` and `load(key)` keep native Python values (stored as serialized pickle) across successful calls on the current session branch. Store updates are pending until the whole script succeeds; if it fails for any reason (including return-value serialization), all pending store updates are discarded and previously persisted values remain unchanged.",
 		"- `ALL_TOOLS`, `await searchTools(query, {\"limit\": 8, \"namespace\": \"name\"})`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
 	];
 	if (models) {

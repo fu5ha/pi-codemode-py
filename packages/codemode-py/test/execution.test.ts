@@ -53,6 +53,54 @@ describe("script execution", () => {
 		expect(await env.execute("import asyncio, pathlib\nawait asyncio.sleep(0.01)\nreturn pathlib.Path('x').name")).toMatchObject({ ok: true, value: "x" });
 	});
 
+	it("shows trailing expressions once, including multiline await, with a warning", async () => {
+		const result = await createEnv([echo]).execute(
+			"calls = []\nasync def last():\n    calls.append(1)\n    return await tools.echo({'calls': calls})\n(\n    await last()\n)\n# trailing comment",
+		);
+		expect(result).toMatchObject({ ok: true, value: null });
+		expect(result.output).toEqual([
+			{ type: "text", text: '{"calls":[1]}' },
+			{ type: "text", text: expect.stringContaining("Did you intend to return this value?") },
+		]);
+		expect(result.calls).toHaveLength(1);
+	});
+
+	it("uses repr for non-JSON trailing values and retains store writes", async () => {
+		const result = await createEnv().execute("store('k', 1)\n{1, 2}");
+		expect(result).toMatchObject({ ok: true, value: null });
+		expect(result.output[0]).toEqual({ type: "text", text: "{1, 2}" });
+		if (result.ok) expect(result.storeWrites.set.k).toBeInstanceOf(Uint8Array);
+	});
+
+	it("does not warn for None or rewrite assignments, compound statements, or explicit returns", async () => {
+		for (const code of ["None", "x = 1", "if True:\n    42", "def nested():\n    42", "return 42\n99"]) {
+			const result = await createEnv().execute(code);
+			expect(result).toMatchObject({ ok: true, output: [] });
+		}
+		expect(await createEnv().execute("print('shown')")).toMatchObject({
+			ok: true, output: [{ type: "text", text: "shown" }],
+		});
+	});
+
+	it("shows falsey non-None expressions and avoids helper name collisions", async () => {
+		for (const expression of ["0", "False", "''", "[]"]) {
+			const result = await createEnv().execute(`__codemode_trailing_expression__ = 123\n${expression}`);
+			expect(result.ok).toBe(true);
+			expect(result.output).toHaveLength(2);
+		}
+	});
+
+	it("preserves trailing expression traceback locations and failure store semantics", async () => {
+		const result = await createEnv().execute("store('k', 1)\n1 / 0");
+		expect(result).toMatchObject({
+			ok: false,
+			output: [],
+			error: { diagnostics: [{ name: "ZeroDivisionError", frames: [{ line: 2, source: "1 / 0" }] }] },
+		});
+		expect(result).not.toHaveProperty("storeWrites");
+		expect(await createEnv().execute("store('k', 1)\nreturn {1, 2}")).toMatchObject({ ok: false });
+	});
+
 	it("uses UTF-8 mode for default pathlib and open text file encoding", async () => {
 		const content = "café 日本語 🐍";
 		const result = await createEnv().execute(py(`

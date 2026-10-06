@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createHarness } from "./harness.ts";
-import { CODEMODE_STORE_ENTRY_TYPE, type CodemodeToolDetails } from "../tool.ts";
+import { CODEMODE_STORE_ENTRY_TYPE, CODEMODE_TOOL_NAME, type CodemodeToolDetails } from "../tool.ts";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 const schema = Type.Object({ text: Type.String() });
@@ -31,12 +31,12 @@ describe("Python codemode in the real Pi pipeline", () => {
 		const harness = await setup({ tools: [echo] });
 		const description = (name: string) => harness.session.agent.state.tools.find((tool) => tool.name === name)?.description ?? "";
 		expect(description("echo")).toContain("Codemode: `await tools.echo(args)` returns");
-		expect(description("codemode")).not.toContain("### `echo`");
+		expect(description(CODEMODE_TOOL_NAME)).not.toContain("### `echo`");
 		await harness.run('return await tools.echo({"text": "on"})');
 		expect(harness.getRequestTools()).toContain("echo");
 		harness.settingsManager.applyOverrides({ codemode: { mode: "only" } });
-		harness.session.setActiveToolsByName(["echo", "codemode"]);
-		expect(description("codemode")).toContain("### `echo`");
+		harness.session.setActiveToolsByName(["echo", CODEMODE_TOOL_NAME]);
+		expect(description(CODEMODE_TOOL_NAME)).toContain("### `echo`");
 		expect(resultText(await harness.run('return await tools.echo({"text": "only"})'))).toBe("echo: only");
 		expect(harness.getRequestTools()).not.toContain("echo");
 		expect(harness.getRequestPrompt()).not.toContain("\n- echo: ");
@@ -136,6 +136,16 @@ for args in [{"text": "blocked"}, {}]:
 		harness.manager.appendCustomEntry("codemode-store", { set: { count: 99 }, delete: [] });
 		expect(resultText(await harness.run('store("count", None)\nreturn load("count")'))).toBe("null");
 		expect(resultText(await harness.run('return load("count")'))).toBe("null");
+	});
+
+	it("shows a non-JSON trailing expression with a warning without discarding store updates", async () => {
+		const harness = await setup();
+		const result = await harness.run('store("progress", 42)\n{1, 2}');
+		expect(result.isError, resultText(result)).toBe(false);
+		expect(resultText(result)).toContain("{1, 2}");
+		expect(resultText(result)).toMatch(/warning/i);
+		expect(resultText(result)).toMatch(/return/i);
+		expect(resultText(await harness.run('return load("progress")'))).toBe("42");
 	});
 
 	it("enforces source deadlines and spills token-limited output while retaining images", async () => {
