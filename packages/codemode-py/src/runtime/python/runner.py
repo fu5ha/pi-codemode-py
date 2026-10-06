@@ -349,6 +349,7 @@ async def run():
     loop = asyncio.get_running_loop()
     threading.Thread(target=receive, args=(loop,), daemon=True).start()
     namespace = {
+        "asyncio": asyncio,
         "tools": Tools(_config["tools"]),
         "ALL_TOOLS": [{"name": item["scriptName"], "description": item["description"]} for item in _config["tools"]],
         "text": text, "image": image, "exit": exit, "store": store, "load": load,

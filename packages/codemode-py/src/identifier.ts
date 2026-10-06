@@ -39,7 +39,7 @@ export function validateToolNames(tools: readonly { name: string }[]): void {
 }
 
 const RESERVED_GLOBALS = new Set([
-	"tools", "ALL_TOOLS", "text", "exit", "store", "load", "__builtins__", "__codemode_main__",
+	"asyncio", "tools", "ALL_TOOLS", "text", "exit", "store", "load", "__builtins__", "__codemode_main__",
 ]);
 
 /** Globals keep their explicit spelling; image is the one replaceable built-in helper. */

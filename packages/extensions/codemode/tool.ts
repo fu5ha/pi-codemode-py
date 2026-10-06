@@ -21,6 +21,7 @@
  * so each branch sees the values written on its own path.
  */
 
+import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { CodemodeError, CodemodeJsonSchema, CodemodeTool } from "@fu5ha/pi-codemode-py";
 import {
@@ -130,31 +131,33 @@ export interface CodemodeToolDetails {
 }
 
 export const codemodeToolSystemPromptContribution = {
-	snippet: "Run trusted Python that calls other tools",
+	snippet: "Run general Python that may also call other tools",
 	guidelines: [
-		"Use codemode to batch independent tool calls with asyncio.gather(..., return_exceptions=True), chain them, or filter large output.",
+		"Use codemode-exposed tools in `exec_python` to batch independent tool calls with asyncio.gather(..., return_exceptions=True), chain them, or filter large output.",
 	],
 } as const;
 
 /** The reference for scripts: globals, tool results, `store()`, the `models` API, and limits. */
-export const CODEMODE_DOCS_PATH = "the Python interface described in this tool";
+export const CODEMODE_DOCS_PATH = fileURLToPath(new URL("./docs/codemode.md", import.meta.url));
 
 const DESCRIPTION_INTRO = `Run a Python script using the system python3 (3.12+) with full library and system access as well as a codemode tool interface for codemode-exposed pi and MCP server tools.
-Input is raw Python (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. Standard libraries, filesystem, network, and timers are available.
-- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError. \`tools["tool-name"]\` works for exact-name tool lookup. Calls still running when the script ends are cancelled; side effects are not undone.
+This may be used both for general python scripts, codemode tool calling, or combining both together.
+Input is raw Python (not JSON, no code fence) and run as the body of an async function. \`asyncio\` is automatically imported, so top-level \`await\`, \`asyncio\` combinators, and \`return\` work. Standard libraries, filesystem, network, and timers are available.
+- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError. Calls still running when the script ends are cancelled; side effects are not undone.
 - Pass tool arguments and helper options as dictionaries.
-- Optional first line configures script run parameters: \`# @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
+- Optional first line configures script run parameters: \`# @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\`
+Read ${CODEMODE_DOCS_PATH} for the full Python interface, examples, and limits.`;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
 function describeGlobals(models: boolean): string {
 	const lines = [
 		"Globals:",
-		"- `text(value)`, `image(dataUrlOrImageBlock)`, and `print(...)` add output; `exit()` ends the script. Returns must be JSON-compatible; None becomes JSON null at every level, including implicit returns and exit(). text() falls back to repr(). image() accepts base64 data URLs or image blocks and saves them to a temp file.",
-		"- `store(key, value)` and `load(key)` keep native Python pickle values across successful calls on the current session branch. load() returns a copy; missing keys return None; store(key, None) deletes. Limits: 256 KiB per serialized value, 2 MiB total before base64.",
-		"- `ALL_TOOLS`, `await searchTools(query, {\"limit\": 8, \"namespace\": \"name\"})`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools. Returned names are callable Python aliases; use `getattr(tools, entry[\"name\"])(args)` for dynamic calls. Bracket lookup uses the original tool name.",
+		"- `text(value)`, `image(value)`, `print(...)`, and `return` add output; `exit()` ends the script.",
+		"- `store(key, value)` and `load(key)` keep native Python values (stored as serialized pickle) across successful calls on the current session branch, providing soft REPL-like capabilities.",
+		"- `ALL_TOOLS`, `await searchTools(query, {\"limit\": 8, \"namespace\": \"name\"})`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
 	];
 	if (models) {
-		lines.push(`- \`models\`: all functions are awaited and positional-only. getModelsOfType(type, provider), getAvailableOfType(type, provider), getModelOfType(type, provider, id); provider can be omitted or passed as None positionally for the first two, e.g. \`await models.getModelsOfType("image", None)\`. type is "chat", "classifier", or "image". classify(model, {"state": {...}, "questions": {"id": {"type": "bool", "instructions": "...", "criteria": {"true": "...", "false": "..."}}}}) returns answers by ID; choice criteria map labels to meanings; score criteria list levels. generateImages(model, {"input": [{"type": "text", "text": "..."}]}) returns output blocks: show image blocks with image(block). Model is a catalog entry or {"provider": "...", "id": "..."}. Check result["stopReason"] ("stop", "error", "aborted") and errorMessage. At most four classify/image calls run concurrently. Usage contributes to session totals.`);
+		lines.push(`- \`models\`: model catalog, classifiers, and image generation. Read ${CODEMODE_DOCS_PATH} first.`);
 	}
 	return lines.join("\n");
 }

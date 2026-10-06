@@ -33,7 +33,7 @@
 		"vitest": "4.1.11"
 	},
 	"scripts": {
-		"build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\" && tsc -p tsconfig.build.json",
+		"build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\" && tsc -p tsconfig.build.json && node --input-type=module -e \"import { cpSync } from 'node:fs'; cpSync('docs', 'dist/docs', { recursive: true });\"",
 		"test": "npm run build && vitest --run",
 		"prepack": "npm run build"
 	}
