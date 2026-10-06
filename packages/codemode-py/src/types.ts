@@ -65,11 +65,31 @@ export type CodemodeErrorKind =
 	/** Python startup, lifecycle setup, or bridge transport failed outside the script. */
 	| "exec";
 
+/** A source location belonging to the submitted script, never an imported library or runner. */
+export interface CodemodeDiagnosticFrame {
+	line: number;
+	source: string;
+	function?: string;
+	/** One-based source columns, when available (endColumn is exclusive). */
+	column?: number;
+	endColumn?: number;
+}
+
+/** An exception chain entry, ordered oldest first. */
+export interface CodemodeDiagnostic {
+	name: string;
+	message: string;
+	/** How this exception relates to the preceding entry. */
+	relation?: "cause" | "context";
+	frames: CodemodeDiagnosticFrame[];
+}
+
 export interface CodemodeError {
 	kind: CodemodeErrorKind;
 	name?: string;
 	message: string;
 	stack?: string;
+	diagnostics?: CodemodeDiagnostic[];
 }
 
 /** Keys the script changed with `store()`. Only successful executions report writes. */

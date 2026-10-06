@@ -208,6 +208,49 @@ describe("script execution", () => {
 		}
 	});
 
+	it("keeps only submitted-script frames in structured diagnostics", async () => {
+		const result = await createEnv().execute("import json\n\ndef decode():\n    return json.loads('invalid')\n\nreturn decode()");
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.diagnostics).toEqual([{
+				name: "JSONDecodeError", message: "Expecting value: line 1 column 1 (char 0)",
+				frames: [
+					{ line: 6, source: "return decode()", function: "__codemode_main__" },
+					{ line: 4, source: "    return json.loads('invalid')", function: "decode" },
+				],
+			}]);
+			expect(result.error.stack).toContain("json");
+		}
+	});
+
+	it("reports syntax diagnostics with original source and caret columns", async () => {
+		const result = await createEnv().execute("\na = 1\nb =\nreturn a");
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.diagnostics).toEqual([{
+				name: "SyntaxError", message: expect.any(String),
+				frames: [{ line: 3, source: "b =", column: 4, endColumn: expect.any(Number) }],
+			}]);
+		}
+	});
+
+	it("preserves explicit and implicit exception chains without runner frames", async () => {
+		for (const [suffix, relation] of [[" from error", "cause"], ["", "context"]] as const) {
+			const result = await createEnv().execute(`try:\n    raise ValueError("first")\nexcept ValueError as error:\n    raise RuntimeError("second")${suffix}`);
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.error.diagnostics).toEqual([
+					{ name: "ValueError", message: "first", frames: [{ line: 2, source: '    raise ValueError("first")', function: "__codemode_main__" }] },
+					{ name: "RuntimeError", message: "second", relation, frames: [{ line: 4, source: `    raise RuntimeError("second")${suffix}`, function: "__codemode_main__" }] },
+				]);
+			}
+		}
+		const suppressed = await createEnv().execute('try:\n    raise ValueError("first")\nexcept ValueError:\n    raise RuntimeError("second") from None');
+		if (suppressed.ok) throw new Error("Expected failure");
+		expect(suppressed.error.diagnostics).toHaveLength(1);
+		expect(suppressed.error.diagnostics?.[0].relation).toBeUndefined();
+	});
+
 	it("reports unsupported or non-finite returns as script errors requiring conversion", async () => {
 		const env = createEnv();
 		for (const source of ["return {1, 2}", "return float('nan')", "return b'bytes'"]) {

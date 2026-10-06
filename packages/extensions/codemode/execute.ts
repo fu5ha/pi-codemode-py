@@ -228,6 +228,20 @@ function valueText(value: unknown): string {
 	return JSON.stringify(value) ?? String(value);
 }
 
+/** Keep failure output separate without duplicating image payloads or unbounded text in details. */
+function failureOutput(items: (TextContent | ImageContent)[], maxTokens: number): { type: "text" | "image"; text?: string }[] {
+	const text = items.filter((item): item is TextContent => item.type === "text").map((item) => item.text).join("\n");
+	const budget = maxTokens * CHARS_PER_TOKEN;
+	const head = Math.floor(budget / 2);
+	const tail = budget - head;
+	const preview = text.length <= budget ? text :
+		`${text.slice(0, head)}\n… output truncated …\n${tail ? text.slice(-tail) : ""}`;
+	return [
+		...(preview ? [{ type: "text" as const, text: preview }] : []),
+		...items.filter((item) => item.type === "image").map(() => ({ type: "image" as const })),
+	];
+}
+
 function formatCallSummary(calls: readonly CodemodeNestedCall[]): string {
 	if (calls.length === 0) return "No tool calls were made.";
 	return `Tool calls made before the failure (they are not undone): ${calls.map((call) => `${call.name} (${call.status})`).join(", ")}`;
@@ -447,8 +461,6 @@ export async function executeCodemode(
 		}
 		// pi extension: a returned value is appended like text().
 		if (result.value !== undefined) items.push({ type: "text", text: valueText(result.value) });
-	} else {
-		items.push({ type: "text", text: `Script error:\n${formatError(result, calls)}` });
 	}
 	if (generatedImages > 0 && !items.some((item) => item.type === "image")) {
 		items.push({
@@ -457,13 +469,19 @@ export async function executeCodemode(
 		});
 	}
 
-	const truncated = await truncateOutput(items, sourceOptions.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS);
+	const maxOutputTokens = sourceOptions.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+	const ordinaryOutput = !result.ok ? failureOutput(items, maxOutputTokens) : undefined;
+	if (!result.ok) items.push({ type: "text", text: `Script error:\n${formatError(result, calls)}` });
+	const truncated = await truncateOutput(items, maxOutputTokens);
 	// After truncation, which joins the text items and moves images after them, so each path stays
 	// next to its image and is never cut.
 	const output = await saveImages(truncated.items);
 	const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
 	const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${wallTime} seconds\nOutput:\n`;
 	const details = snapshot();
+	if (!result.ok) details.failure = {
+		error: result.error, durationMs: performance.now() - startedAt, output: ordinaryOutput!,
+	};
 	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
 	return {
 		content: [{ type: "text", text: header }, ...output],

@@ -98,5 +98,14 @@ def read_frame():
     return json.loads(read_exact(size))
 
 
-_config = read_frame()
-exec(compile(_config.pop("runner"), "<codemode-runner>", "exec"), globals())
+_bootstrap = read_frame()
+_config = _bootstrap["data"]
+try:
+    exec(compile(_bootstrap["runner"], "<codemode-runner>", "exec"), globals())
+except BaseException as error:
+    # Backend failures are distinct from script errors. Keep the process alive
+    # after sending so the host can consume the frame before socket teardown.
+    import threading
+    _failure = json.dumps({"type": "crash", "message": f"Execution worker failed: {type(error).__name__}: {error}"}).encode("utf-8")
+    _bridge.sendall(struct.pack("!I", len(_failure)) + _failure)
+    threading.Event().wait()

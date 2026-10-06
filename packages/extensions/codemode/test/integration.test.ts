@@ -98,8 +98,26 @@ for args in [{"text": "blocked"}, {}]:
 		expect(resultText(result)).toContain("echo: ok");
 		expect(resultText(result)).toContain("codemode.py");
 		expect(resultText(result)).toContain("ValueError: boom");
+		expect((result.details as unknown as CodemodeToolDetails).failure).toMatchObject({
+			error: { name: "ValueError", diagnostics: [{ name: "ValueError", frames: [{ line: 3, source: 'raise ValueError("boom")' }] }] },
+			output: [{ type: "text", text: '{"files":2}\necho: ok' }],
+		});
 		expect(result.usage?.input).toBe(9);
 		expect(result.usage?.cost.total).toBeCloseTo(0.005);
+	});
+
+	it("retains presentation diagnostics even with a tiny output budget", async () => {
+		const harness = await setup();
+		const result = await harness.run('# @options: {"max_output_tokens": 1}\nprint("x" * 100)\nraise ValueError("important failure")');
+		const details = result.details as unknown as CodemodeToolDetails;
+		expect(details.calls).toEqual([]);
+		expect(details.failure?.error).toMatchObject({
+			name: "ValueError", message: "important failure",
+			diagnostics: [{ name: "ValueError", frames: [{ line: 3, source: 'raise ValueError("important failure")' }] }],
+		});
+		expect(details.failure?.output[0].text).toContain("output truncated");
+		expect(details.fullOutputPath).toBeTruthy();
+		rmSync(details.fullOutputPath!, { force: true });
 	});
 
 	it("persists native pickle state only on successful calls, folds branch state, and ignores JSON-store entries", async () => {

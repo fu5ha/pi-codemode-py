@@ -28,6 +28,8 @@ export {
 export type {
 	CodemodeCall,
 	CodemodeCallStatus,
+	CodemodeDiagnostic,
+	CodemodeDiagnosticFrame,
 	CodemodeError,
 	CodemodeErrorKind,
 	CodemodeExecuteOptions,

@@ -2,12 +2,13 @@
  * Presentation for the codemode tool.
  *
  * The call shows the script; the result lists the nested tool calls with their status as they
- * run and the cost of its model calls, followed by the script output without the "Script completed"
- * header. Nested calls are not
+ * run and the cost of its model calls, followed by script output. Failed executions lead with
+ * a compact script-only diagnostic; expansion reveals the remaining script frames, not library
+ * or bootstrap internals. Nested calls are not
  * separate tool rows because they never reach the model as tool calls.
  */
 
-import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { keyHint, highlightCode, truncateToVisualLines, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CodemodeNestedCall, CodemodeToolDetails } from "./tool.ts";
 
@@ -29,7 +30,9 @@ class VisualLinePreview implements Component {
 		const { text, maxVisualLines, keep, formatHint } = this.options;
 		const result = truncateToVisualLines(text, maxVisualLines, width, 0, keep);
 		if (!result.skippedCount) return result.visualLines;
-		const hint = truncateToWidth(formatHint(result.skippedCount), width, "...");
+		const fullHint = formatHint(result.skippedCount);
+		const hint = truncateToWidth(visibleWidth(fullHint) <= width ? fullHint :
+			`… ${result.skippedCount} more; ${keyHint("app.tools.expand", "expand")}`, width, "...");
 		return keep === "start" ? [...result.visualLines, hint] : [hint, ...result.visualLines];
 	}
 	invalidate(): void {}
@@ -81,6 +84,54 @@ function formatCall(call: CodemodeNestedCall, theme: Theme, expanded: boolean): 
 	return line;
 }
 
+function renderFailure(failure: NonNullable<CodemodeToolDetails["failure"]>, expanded: boolean, theme: Theme): Component {
+	const component = new Container();
+	const { error } = failure;
+	component.addChild(new Text(theme.fg("error", `✗ Script failed · ${formatDuration(failure.durationMs)}`), 0, 0));
+	const diagnostics = error.diagnostics?.length ? error.diagnostics : [{
+		name: error.name ?? "",
+		message: error.kind === "timeout" ? `Script timed out: ${error.message}` :
+			error.kind === "aborted" ? `Script aborted: ${error.message}` :
+			error.kind === "exec" ? `Python execution failed: ${error.message}` : error.message,
+		frames: [],
+	}];
+	const shown = expanded ? diagnostics : diagnostics.slice(-1);
+	for (const diagnostic of shown) {
+		if (expanded && diagnostic.relation) {
+			component.addChild(new Text(theme.fg("muted", diagnostic.relation === "cause" ?
+				"The above exception caused the following exception:" :
+				"During handling of the above exception:"), 0, 0));
+		}
+		const summary = theme.fg("error", `${diagnostic.name ? `${diagnostic.name}: ` : ""}${diagnostic.message}`);
+		component.addChild(expanded ? new Text(summary, 0, 0) : new VisualLinePreview({
+			text: summary, maxVisualLines: 3, keep: "start",
+			formatHint: (hidden) => expandHint(theme, hidden, "error lines"),
+		}));
+		const frames = expanded ? diagnostic.frames : diagnostic.frames.slice(-1);
+		for (const frame of frames) {
+			const name = frame.function && frame.function !== "__codemode_main__" ? ` in ${frame.function}` : "";
+			const location = theme.fg("muted", `  codemode.py:${frame.line}${name}`);
+			const source = replaceTabs(frame.source);
+			let text = `${location}\n${theme.fg("toolOutput", `  ${frame.line} │ ${source}`)}`;
+			if (frame.column !== undefined) {
+				// Columns refer to original Python source; tabs occupy four displayed columns.
+				const characters = Array.from(frame.source);
+				const prefix = visibleWidth(replaceTabs(characters.slice(0, frame.column - 1).join("")));
+				const span = visibleWidth(replaceTabs(characters.slice(frame.column - 1, (frame.endColumn ?? frame.column + 1) - 1).join("")));
+				text += `\n${theme.fg("error", `  ${" ".repeat(String(frame.line).length)} │ ${" ".repeat(prefix)}${"^".repeat(Math.max(1, span))}`)}`;
+			}
+			component.addChild(expanded ? new Text(text, 0, 0) : new VisualLinePreview({
+				text, maxVisualLines: 4, keep: "start",
+				formatHint: (hidden) => expandHint(theme, hidden, "source lines"),
+			}));
+		}
+	}
+	if (!expanded && (diagnostics.length > 1 || diagnostics.at(-1)!.frames.length > 1)) {
+		component.addChild(new Text(`${theme.fg("muted", "… script traceback,")} ${keyHint("app.tools.expand", "to expand")}`, 0, 0));
+	}
+	return component;
+}
+
 export const codemodeRenderers: Pick<
 	ToolDefinition<any, CodemodeToolDetails | undefined>,
 	"renderCall" | "renderResult"
@@ -115,6 +166,11 @@ export const codemodeRenderers: Pick<
 		const component = (context.lastComponent as Container | undefined) ?? new Container();
 		component.clear();
 		const calls = result.details?.calls ?? [];
+		const failure = options.isPartial ? undefined : result.details?.failure;
+		if (failure) {
+			component.addChild(new Spacer(1));
+			component.addChild(renderFailure(failure, options.expanded, theme));
+		}
 		if (calls.length > 0) {
 			const shown = options.expanded ? calls : calls.slice(-CALL_PREVIEW_COUNT);
 			const lines = shown.map((call) => formatCall(call, theme, options.expanded));
@@ -139,14 +195,15 @@ export const codemodeRenderers: Pick<
 		const hasHeader = first?.type === "text" && SCRIPT_HEADER.test(first.text);
 		const output = options.isPartial
 			? ""
-			: getTextOutput({ ...result, content: hasHeader ? rest : result.content }, context.showImages).trim();
+			: getTextOutput({ content: failure ? failure.output : hasHeader ? rest : result.content }, context.showImages).trim();
 		if (output) {
-			const color = context.isError ? "error" : "toolOutput";
+			const color = context.isError && !failure ? "error" : "toolOutput";
 			const styled = replaceTabs(output)
 				.split("\n")
 				.map((line) => theme.fg(color, line))
 				.join("\n");
 			component.addChild(new Spacer(1));
+			if (failure) component.addChild(new Text(theme.fg("muted", "Output before failure:"), 0, 0));
 			if (options.expanded) {
 				component.addChild(new Text(styled, 0, 0));
 			} else {
@@ -163,6 +220,9 @@ export const codemodeRenderers: Pick<
 				const fullOutputPath = result.details?.fullOutputPath;
 				if (fullOutputPath) component.addChild(new Text(theme.fg("muted", `Full output: ${fullOutputPath}`), 0, 0));
 			}
+		}
+		if (failure && result.details?.fullOutputPath && (!output || options.expanded)) {
+			component.addChild(new Text(theme.fg("muted", `Full output: ${result.details.fullOutputPath}`), 0, 0));
 		}
 		return component;
 	},

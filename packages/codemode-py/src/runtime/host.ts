@@ -3,17 +3,49 @@ import { randomBytes } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import { toCodemodeIdentifier, validateGlobalNames, validateToolNames } from "../identifier.ts";
 import type {
-	CodemodeCall, CodemodeError, CodemodeExecuteOptions, CodemodeOutputItem, CodemodeResult,
+	CodemodeCall, CodemodeDiagnostic, CodemodeError, CodemodeExecuteOptions, CodemodeOutputItem, CodemodeResult,
 	CodemodeExecutionEnvOptions, CodemodeStoreWrites, CodemodeTool,
 } from "../types.ts";
 import { MAX_BRIDGE_BYTES, MAX_OUTPUT_CHARS, MAX_OUTPUT_ITEMS, MAX_STORE_TOTAL_BYTES, MAX_STORE_VALUE_BYTES } from "./limits.ts";
-import type { HostToPythonMessage, PythonToHostMessage } from "./protocol.ts";
+import { isWorkerToHostMessage, type HostToWorkerMessage, type WorkerData, type WorkerToHostMessage } from "./protocol.ts";
 import { BOOTSTRAP_SOURCE, RUNNER_SOURCE } from "./python-source.ts";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function parseDiagnostics(value: unknown): CodemodeDiagnostic[] | undefined {
+	if (value === undefined) return undefined;
+	const fail = (): never => { throw new Error("Invalid script diagnostics"); };
+	if (!Array.isArray(value)) return fail();
+	return value.map((entry: unknown) => {
+		if (typeof entry !== "object" || entry === null) return fail();
+		const fields = entry as Record<string, unknown>;
+		if (typeof fields.name !== "string" || typeof fields.message !== "string"
+			|| fields.relation !== undefined && fields.relation !== "cause" && fields.relation !== "context"
+			|| !Array.isArray(fields.frames)) return fail();
+		const frames = fields.frames.map((frame: unknown) => {
+			if (typeof frame !== "object" || frame === null) return fail();
+			const source = frame as Record<string, unknown>;
+			const positiveInteger = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) > 0;
+			if (!positiveInteger(source.line) || typeof source.source !== "string"
+				|| source.function !== undefined && typeof source.function !== "string"
+				|| source.column !== undefined && !positiveInteger(source.column)
+				|| source.endColumn !== undefined && !positiveInteger(source.endColumn)) return fail();
+			return {
+				line: source.line, source: source.source,
+				...(source.function === undefined ? {} : { function: source.function as string }),
+				...(source.column === undefined ? {} : { column: source.column as number }),
+				...(source.endColumn === undefined ? {} : { endColumn: source.endColumn as number }),
+			};
+		});
+		return {
+			name: fields.name, message: fields.message, frames,
+			...(fields.relation === undefined ? {} : { relation: fields.relation as "cause" | "context" }),
+		};
+	});
 }
 
 function serializeStore(store: CodemodeExecuteOptions["store"]): Record<string, string> {
@@ -29,11 +61,18 @@ function serializeStore(store: CodemodeExecuteOptions["store"]): Record<string, 
 	return serialized;
 }
 
-function parseStoreWrites(values: Record<string, string | null>): CodemodeStoreWrites {
+function parseStoreWrites(serialized: string): CodemodeStoreWrites {
+	const values: unknown = JSON.parse(serialized);
+	if (!Array.isArray(values)) throw new Error("Invalid store writes");
 	const writes: CodemodeStoreWrites = { set: Object.create(null), delete: [] };
+	const keys = new Set<string>();
 	let total = 0;
-	for (const [key, value] of Object.entries(values)) {
-		if (value === null) {
+	for (const entry of values) {
+		if (!Array.isArray(entry) || (entry.length !== 1 && entry.length !== 2)
+			|| typeof entry[0] !== "string" || keys.has(entry[0])) throw new Error("Invalid store write");
+		const [key, value] = entry;
+		keys.add(key);
+		if (entry.length === 1) {
 			writes.delete.push(key);
 		} else {
 			if (typeof value !== "string") throw new Error("Invalid pickle store write");
@@ -61,6 +100,12 @@ interface ExecutionOptions {
 	timeoutMs: number;
 	signal: AbortSignal | undefined;
 	store: Record<string, string>;
+}
+
+/** Private Python bootstrap envelope, not part of the worker protocol. */
+interface PythonBootstrapData {
+	runner: string;
+	data: WorkerData;
 }
 
 /** One trusted Python process per execution; no sandbox or memory-limit promise. */
@@ -183,16 +228,16 @@ class Execution {
 					buffer = buffer.subarray(newline + 1);
 					// No scripts or pickle values on argv: send them only after the
 					// Python version check and cleanup job have succeeded.
-					this.post({
-						runner: RUNNER_SOURCE,
+					const data: WorkerData = {
 						code: this.options.code,
 						tools: [...this.options.tools.values()].map((tool) => ({
-							name: tool.name, alias: toCodemodeIdentifier(tool.name), description: tool.description ?? "",
+							name: tool.name, scriptName: toCodemodeIdentifier(tool.name), description: tool.description ?? "",
 						})),
 						globals: [...this.options.globals.values()].map((global) => ({ name: global.name, spread: global.spread === true })),
 						store: this.options.store,
 						limits: { outputChars: MAX_OUTPUT_CHARS, outputItems: MAX_OUTPUT_ITEMS, storeValueBytes: MAX_STORE_VALUE_BYTES, storeTotalBytes: MAX_STORE_TOTAL_BYTES },
-					});
+					};
+					this.post({ runner: RUNNER_SOURCE, data });
 				}
 				while (buffer.length >= 4 && !this.finished) {
 					const length = buffer.readUInt32BE(0);
@@ -208,7 +253,7 @@ class Execution {
 		});
 	}
 
-	private post(message: HostToPythonMessage | Record<string, unknown>): void {
+	private post(message: HostToWorkerMessage | PythonBootstrapData): void {
 		if (this.finished || !this.socket) return;
 		try {
 			const body = Buffer.from(JSON.stringify(message));
@@ -238,8 +283,8 @@ class Execution {
 	}
 
 	private handleMessage(value: unknown): void {
-		if (typeof value !== "object" || value === null) throw new Error("Expected a message object");
-		const message = value as PythonToHostMessage;
+		if (!isWorkerToHostMessage(value)) throw new Error("Unknown worker bridge message");
+		const message = value;
 		switch (message.type) {
 			case "output":
 				if (!message.item || !(message.item.type === "text" && typeof message.item.text === "string"
@@ -253,21 +298,35 @@ class Execution {
 				break;
 			case "call":
 				if (!Number.isSafeInteger(message.id) || this.pending.has(message.id) || typeof message.name !== "string"
-					|| !["tool", "global"].includes(message.target)) throw new Error("Invalid tool call");
-				void this.handleCall(message);
+					|| !["tool", "global"].includes(message.target) || typeof message.args !== "string") throw new Error("Invalid tool call");
+				void this.handleCall(message, JSON.parse(message.args));
 				break;
 			case "cancel":
+				if (!Number.isSafeInteger(message.id)) throw new Error("Invalid call cancellation");
 				this.cancelCall(message.id);
 				break;
 			case "done":
 				if (message.ok === true) {
-					if (!message.writes || typeof message.writes !== "object" || Array.isArray(message.writes)) throw new Error("Invalid store writes");
-					this.finish(undefined, message.value, parseStoreWrites(message.writes));
-				} else if (message.ok === false && message.error && typeof message.error.message === "string") {
-					this.finish({ ...message.error, kind: "script" });
+					if (typeof message.value !== "string" || typeof message.writes !== "string") throw new Error("Invalid execution result");
+					this.finish(undefined, JSON.parse(message.value), parseStoreWrites(message.writes));
+				} else if (message.ok === false && typeof message.error === "string") {
+					const error: unknown = JSON.parse(message.error);
+					if (typeof error !== "object" || error === null) throw new Error("Invalid script error");
+					const fields = error as Record<string, unknown>;
+					if (typeof fields.message !== "string"
+						|| fields.name !== undefined && typeof fields.name !== "string"
+						|| fields.stack !== undefined && typeof fields.stack !== "string") throw new Error("Invalid script error");
+					this.finish({
+						kind: "script", message: fields.message,
+						name: fields.name as string | undefined, stack: fields.stack as string | undefined,
+						diagnostics: parseDiagnostics(fields.diagnostics),
+					});
 				} else throw new Error("Invalid execution result");
 				break;
-			default: throw new Error("Unknown Python bridge message");
+			case "crash":
+				if (typeof message.message !== "string") throw new Error("Invalid worker crash");
+				this.finish({ kind: "exec", message: message.message });
+				break;
 		}
 	}
 
@@ -279,26 +338,26 @@ class Execution {
 		pending.controller.abort();
 	}
 
-	private async handleCall(message: Extract<PythonToHostMessage, { type: "call" }>): Promise<void> {
+	private async handleCall(message: Extract<WorkerToHostMessage, { type: "call" }>, args: unknown): Promise<void> {
 		const { id, name } = message;
 		const isTool = message.target === "tool";
 		const record: CodemodeCall | undefined = isTool ? { name, status: "cancelled", durationMs: 0 } : undefined;
 		if (record) this.calls.push(record);
 		const pending: PendingCall = { record, startedAt: performance.now(), controller: new AbortController() };
 		this.pending.set(id, pending);
-		let reply: HostToPythonMessage;
+		let reply: HostToWorkerMessage;
 		let status: "ok" | "error";
 		try {
 			const tool = (isTool ? this.options.tools : this.options.globals).get(name);
 			if (!tool) throw new Error(`Unknown ${isTool ? "tool" : "global"} "${name}"`);
-			const value = await tool.execute(message.args, { signal: pending.controller.signal });
+			const value = await tool.execute(args, { signal: pending.controller.signal });
 			// Host undefined is JSON null; all other results must survive JSON serialization.
 			const json = JSON.stringify(value === undefined ? null : value);
 			if (json === undefined) throw new TypeError("Tool result is not JSON-serializable");
-			reply = { type: "result", id, ok: true, value: JSON.parse(json) };
+			reply = { type: "result", id, ok: true, payload: json };
 			status = "ok";
 		} catch (error) {
-			reply = { type: "result", id, ok: false, message: errorMessage(error) };
+			reply = { type: "result", id, ok: false, payload: errorMessage(error) };
 			status = "error";
 		}
 		if (!this.pending.delete(id)) return;

@@ -109,12 +109,16 @@ def send_done(message):
         send(message)
 
 
+def store_writes():
+    return json.dumps([[key] if value is None else [key, value] for key, value in _writes.items()])
+
+
 def exit():
     # Report success before unwinding, like the upstream helper. Even an
     # `except BaseException` cannot convert exit() into continued execution.
     sys.stdout.flush()
     sys.stderr.flush()
-    send_done({"type": "done", "ok": True, "value": None, "writes": _writes})
+    send_done({"type": "done", "ok": True, "value": "null", "writes": store_writes()})
     raise ScriptExit()
 
 
@@ -178,7 +182,7 @@ def wrapper(name, target, spread=False):
             raise ScriptExit()
         # Round-trip before dispatch: unsupported arguments never start a call.
         payload = list(args) if spread else (args[0] if args else None)
-        payload = json.loads(json.dumps(payload, allow_nan=False))
+        payload = json.dumps(payload, allow_nan=False)
         _next_id += 1
         call_id = _next_id
         future = asyncio.get_running_loop().create_future()
@@ -200,7 +204,7 @@ class Tools:
         for definition in definitions:
             call = wrapper(definition["name"], "tool")
             self._exact[definition["name"]] = call
-            self._aliases[definition["alias"]] = call
+            self._aliases[definition["scriptName"]] = call
 
     def __getattr__(self, name):
         if name in self._aliases:
@@ -223,13 +227,21 @@ class Tools:
 
 
 def complete(message):
-    future = _futures.get(message["id"])
-    if future is None or future.done():
-        return
-    if message["ok"]:
-        future.set_result(message.get("value"))
-    else:
-        future.set_exception(RuntimeError(message["message"]))
+    try:
+        if (not isinstance(message, dict) or message.get("type") != "result"
+                or type(message.get("id")) is not int or type(message.get("ok")) is not bool
+                or not isinstance(message.get("payload"), str)):
+            raise ValueError("invalid host result message")
+        value = json.loads(message["payload"]) if message["ok"] else message["payload"]
+        future = _futures.get(message["id"])
+        if future is None or future.done():
+            return
+        if message["ok"]:
+            future.set_result(value)
+        else:
+            future.set_exception(RuntimeError(value))
+    except BaseException as error:
+        send_done({"type": "crash", "message": f"Invalid host result: {error}"})
 
 
 def receive(loop):
@@ -252,8 +264,59 @@ def receive(loop):
         os._exit(1)
 
 
+def script_diagnostics(error):
+    diagnostics = []
+    seen = set()
+
+    def collect(current):
+        if id(current) in seen:
+            return False
+        seen.add(id(current))
+        relation = None
+        previous = current.__cause__
+        if previous is not None:
+            relation = "cause"
+        elif not current.__suppress_context__ and current.__context__ is not None:
+            previous = current.__context__
+            relation = "context"
+        if previous is not None and not collect(previous):
+            relation = None
+        frames = []
+        for frame in traceback.extract_tb(current.__traceback__):
+            if frame.filename == "codemode.py":
+                item = {
+                    "line": frame.lineno,
+                    "source": linecache.getline("codemode.py", frame.lineno).rstrip("\r\n"),
+                    "function": frame.name,
+                }
+                frames.append(item)
+        if isinstance(current, SyntaxError) and current.filename == "codemode.py" and current.lineno:
+            item = {
+                "line": current.lineno,
+                "source": linecache.getline("codemode.py", current.lineno).rstrip("\r\n"),
+            }
+            if current.offset and current.offset > 0:
+                item["column"] = current.offset
+            if current.end_offset and current.end_offset > 0:
+                item["endColumn"] = current.end_offset
+            frames.append(item)
+        diagnostic = {"name": type(current).__name__, "message": str(current), "frames": frames}
+        if relation:
+            diagnostic["relation"] = relation
+        diagnostics.append(diagnostic)
+        return True
+
+    collect(error)
+    return diagnostics
+
+
 def error_payload(error):
-    return {"name": type(error).__name__, "message": str(error), "stack": "".join(traceback.format_exception(error))}
+    return json.dumps({
+        "name": type(error).__name__,
+        "message": str(error),
+        "stack": "".join(traceback.format_exception(error)),
+        "diagnostics": script_diagnostics(error),
+    })
 
 
 def compile_script(code, namespace):
@@ -287,7 +350,7 @@ async def run():
     threading.Thread(target=receive, args=(loop,), daemon=True).start()
     namespace = {
         "tools": Tools(_config["tools"]),
-        "ALL_TOOLS": [{"name": item["alias"], "description": item["description"]} for item in _config["tools"]],
+        "ALL_TOOLS": [{"name": item["scriptName"], "description": item["description"]} for item in _config["tools"]],
         "text": text, "image": image, "exit": exit, "store": store, "load": load,
     }
     for definition in _config["globals"]:
@@ -308,10 +371,10 @@ async def run():
             value = None
         # No repr fallback for returned values. Give a useful script error.
         try:
-            value = json.loads(json.dumps(value, allow_nan=False))
+            value = json.dumps(value, allow_nan=False)
         except (TypeError, ValueError, OverflowError) as error:
             raise TypeError("return value is not JSON-serializable; explicitly convert it to JSON-compatible values") from error
-        result = {"type": "done", "ok": True, "value": value, "writes": _writes}
+        result = {"type": "done", "ok": True, "value": value, "writes": store_writes()}
     except BaseException as error:
         result = {"type": "done", "ok": False, "error": error_payload(error)}
     finally:

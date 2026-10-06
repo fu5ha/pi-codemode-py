@@ -22,7 +22,7 @@
  */
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { CodemodeJsonSchema, CodemodeTool } from "@fu5ha/pi-codemode-py";
+import type { CodemodeError, CodemodeJsonSchema, CodemodeTool } from "@fu5ha/pi-codemode-py";
 import {
 	MCP_PYTHON_PREAMBLE,
 	mcpStructuredContentSchema,
@@ -118,6 +118,13 @@ export interface CodemodeNestedCall {
 
 export interface CodemodeToolDetails {
 	calls: CodemodeNestedCall[];
+	/** Failure presentation is independent of the model-facing output budget. */
+	failure?: {
+		error: CodemodeError;
+		durationMs: number;
+		/** Budgeted ordinary output, excluding the appended traceback. Images are markers only. */
+		output: { type: "text" | "image"; text?: string }[];
+	};
 	/** Temp file with the full text output, when the output was truncated. */
 	fullOutputPath?: string;
 }
