@@ -139,10 +139,11 @@ export const codemodeToolSystemPromptContribution = {
 /** The reference for scripts: globals, tool results, `store()`, the `models` API, and limits. */
 export const CODEMODE_DOCS_PATH = "the Python interface described in this tool";
 
-const DESCRIPTION_INTRO = `Run trusted, unsandboxed Python using python3 (3.12+). Input is raw Python (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. Standard libraries, filesystem, network, and timers are available.
-- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError. Exact-name lookup: \`tools["original-name"]\`. Calls still running when the script ends are cancelled; side effects are not undone.
-- Injected host functions accept positional arguments only, not Python keyword arguments. Pass tool arguments and helper options as dictionaries.
-- Optional first line: \`# @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
+const DESCRIPTION_INTRO = `Run a Python script using the system python3 (3.12+) with full library and system access as well as a codemode tool interface for codemode-exposed pi and MCP server tools.
+Input is raw Python (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. Standard libraries, filesystem, network, and timers are available.
+- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError. \`tools["tool-name"]\` works for exact-name tool lookup. Calls still running when the script ends are cancelled; side effects are not undone.
+- Pass tool arguments and helper options as dictionaries.
+- Optional first line configures script run parameters: \`# @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
 function describeGlobals(models: boolean): string {
