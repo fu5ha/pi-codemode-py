@@ -26,10 +26,10 @@ python-native pickle format instead of json, but most other uses of json stay.
 
 The host API remains TypeScript. Requires Node.js 22.19+ and `python3` 3.12+ on PATH.
 
-Install dependencies and build with `npm ci` at the repository root. Add `+codemode` to Pi's
-`defaultTools` setting and load the local package with `pi -e .`. Avoid `--tools codemode`: that
+Install dependencies and build with `npm ci` at the repository root. Add `+exec_python` to Pi's
+`defaultTools` setting and load the local package with `pi -e .`. Avoid `--tools exec_python`: that
 allowlist also excludes the other tools from nested calls.
-The extension replaces Pi's bundled `codemode` tool and is registered inactive, like the bundled version.
+The extension registers `exec_python` inactive, like Pi's bundled `codemode` tool.
 The installable adapter package is `@fu5ha/pi-codemode-py-extension`.
 
 ## Usage
