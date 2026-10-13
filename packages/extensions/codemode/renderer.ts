@@ -52,6 +52,53 @@ function formatDuration(ms: number | undefined): string {
 	return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
+// Mirrors Pi's private core/tools/render-utils helpers using only the public render context.
+type ToolRenderContext = Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
+interface ToolTimerState {
+	startedAt?: number;
+	endedAt?: number;
+	interval?: ReturnType<typeof setInterval>;
+}
+
+/** Duration as `4.2s` below a minute, then `1m 30s` and `2h 3m 4s`. */
+function formatToolDuration(ms: number): string {
+	const seconds = ms / 1000;
+	if (seconds < 60) return `${seconds.toFixed(1)}s`;
+	const totalSeconds = Math.floor(seconds);
+	const minutes = Math.floor(totalSeconds / 60);
+	const remainder = totalSeconds % 60;
+	if (minutes < 60) return `${minutes}m ${remainder}s`;
+	return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
+}
+
+/** Start the row's clock once execution starts. Call from renderCall. */
+function startToolTimer(context: ToolRenderContext): void {
+	const state = context.state as ToolTimerState;
+	if (context.executionStarted && state.startedAt === undefined) {
+		state.startedAt = Date.now();
+		state.endedAt = undefined;
+	}
+}
+
+/** Live row timing, with recorded duration preferred for final and reloaded results. */
+function toolTimerText(context: ToolRenderContext, isPartial: boolean): string | undefined {
+	const state = context.state as ToolTimerState;
+	if (state.startedAt !== undefined && isPartial && !state.interval) {
+		state.interval = setInterval(() => context.invalidate(), 1000);
+	}
+	if (!isPartial || context.isError) {
+		state.endedAt ??= Date.now();
+		if (state.interval) {
+			clearInterval(state.interval);
+			state.interval = undefined;
+		}
+	}
+	if (!isPartial && context.durationMs !== undefined) return `Took ${formatToolDuration(context.durationMs)}`;
+	if (state.startedAt === undefined) return undefined;
+	const endTime = state.endedAt ?? Date.now();
+	return `${isPartial ? "Elapsed" : "Took"} ${formatToolDuration(endTime - state.startedAt)}`;
+}
+
 /** Cents for larger amounts, two significant digits for the fractions of a cent classifier calls cost. */
 function formatCost(cost: number): string {
 	return `$${cost >= 0.01 ? cost.toFixed(2) : cost.toPrecision(2)}`;
@@ -137,6 +184,7 @@ export const codemodeRenderers: Pick<
 	"renderCall" | "renderResult"
 > = {
 	renderCall(args, theme, context) {
+		startToolTimer(context);
 		// Options remain visible as part of the Python source.
 		const code = str((args as { code?: unknown } | undefined)?.code);
 		const title = theme.fg("toolTitle", theme.bold("codemode"));
@@ -163,6 +211,7 @@ export const codemodeRenderers: Pick<
 		return component;
 	},
 	renderResult(result, options, theme, context) {
+		const timerText = toolTimerText(context, options.isPartial);
 		const component = (context.lastComponent as Container | undefined) ?? new Container();
 		component.clear();
 		const calls = result.details?.calls ?? [];
@@ -223,6 +272,10 @@ export const codemodeRenderers: Pick<
 		}
 		if (failure && result.details?.fullOutputPath && (!output || options.expanded)) {
 			component.addChild(new Text(theme.fg("muted", `Full output: ${result.details.fullOutputPath}`), 0, 0));
+		}
+		if (timerText) {
+			component.addChild(new Spacer(1));
+			component.addChild(new Text(theme.fg("muted", timerText), 0, 0));
 		}
 		return component;
 	},

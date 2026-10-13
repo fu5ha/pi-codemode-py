@@ -2,13 +2,14 @@
 import { stripVTControlCharacters } from "node:util";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Component } from "@earendil-works/pi-tui";
-import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { beforeAll, describe, expect, it } from "vitest";
+import { initTheme, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { codemodeRenderers } from "../renderer.ts";
 import type { CodemodeToolDetails } from "../tool.ts";
 
 // Rendering is passed a theme by Pi. No import of its private singleton is needed.
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
+type ToolRenderContext = Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
 function render(result: AgentToolResult<CodemodeToolDetails | undefined>, isError = false, expanded = true, width = 200): string {
 	const component = codemodeRenderers.renderResult!(result, { expanded, isPartial: false }, theme, {
 		args: { code: "" }, toolCallId: "call", invalidate: () => {}, lastComponent: undefined,
@@ -18,6 +19,30 @@ function render(result: AgentToolResult<CodemodeToolDetails | undefined>, isErro
 }
 describe("codemode renderer", () => {
 	beforeAll(() => initTheme("dark", false));
+	afterEach(() => vi.useRealTimers());
+	// Upstream #10708, adapted to the public render context instead of private ToolExecutionComponent.
+	it("shows the elapsed time while the script runs and the total once it finished", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const context: ToolRenderContext = {
+			args: { code: "" }, toolCallId: "call", invalidate: () => {}, lastComponent: undefined,
+			state: {}, cwd: "/", executionStarted: true, argsComplete: true, isPartial: true,
+			expanded: false, showImages: false, isError: false,
+		};
+		codemodeRenderers.renderCall!(context.args, theme, context);
+		const text = (isPartial: boolean) => {
+			const component = codemodeRenderers.renderResult!(
+				{ content: [], details: { calls: [] } }, { expanded: false, isPartial }, theme, context,
+			) as Component;
+			return stripVTControlCharacters(component.render(120).join("\n"));
+		};
+		text(true);
+		vi.advanceTimersByTime(3000);
+		expect(text(true)).toContain("Elapsed 3.0s");
+		context.durationMs = 5100;
+		expect(text(false)).toContain("Took 5.1s");
+		expect(text(false)).not.toContain("Elapsed");
+	});
 	it("hides the script header and shows the output", () => {
 		expect(render({
 			content: [{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" }, { type: "text", text: "hello" }],
