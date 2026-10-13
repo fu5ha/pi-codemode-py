@@ -163,16 +163,16 @@ class OutputStream(io.TextIOBase):
         self.pending += value
         # Limit partial lines too; a print without a newline cannot bypass limits.
         if len(self.pending) > MAX_OUTPUT_CHARS:
-            emit({"type": "text", "text": self.pending})
+            emit({"type": "text", "text": self.pending, "console": True})
         while "\n" in self.pending:
             line, self.pending = self.pending.split("\n", 1)
-            text(line.rstrip("\r"))
+            emit({"type": "text", "text": line.rstrip("\r"), "console": True})
         return len(value)
 
     def flush(self):
         if self.pending:
             value, self.pending = self.pending, ""
-            text(value)
+            emit({"type": "text", "text": value, "console": True})
 
 
 def wrapper(name, target, spread=False):

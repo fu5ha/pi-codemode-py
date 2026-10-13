@@ -78,7 +78,7 @@ describe("script execution", () => {
 			expect(result).toMatchObject({ ok: true, output: [] });
 		}
 		expect(await createEnv().execute("print('shown')")).toMatchObject({
-			ok: true, output: [{ type: "text", text: "shown" }],
+			ok: true, output: [{ type: "text", text: "shown", console: true }],
 		});
 	});
 
@@ -163,7 +163,7 @@ describe("script execution", () => {
 		`));
 		expect(result.ok).toBe(true);
 		expect(result.output).toEqual([
-			{ type: "text", text: "hello 1 {'a': 1}" },
+			{ type: "text", text: "hello 1 {'a': 1}", console: true },
 			{ type: "text", text: '{"json":true}' },
 			{ type: "text", text: "null" },
 			{ type: "text", text: "{1, 2}" },
@@ -172,8 +172,8 @@ describe("script execution", () => {
 			{ type: "image", data: GIF, mimeType: "image/gif" },
 			{ type: "image", data: WEBP, mimeType: "image/webp" },
 			{ type: "image", data: PNG, mimeType: "image/png" },
-			{ type: "text", text: "bad" },
-			{ type: "text", text: "partial" },
+			{ type: "text", text: "bad", console: true },
+			{ type: "text", text: "partial", console: true },
 		]);
 	});
 

@@ -13,6 +13,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import {
 	type CodemodeResult,
+	type CodemodeOutputItem,
 	CodemodeExecutionEnv,
 	type CodemodeTool,
 	parseCodemodeSource,
@@ -226,6 +227,71 @@ const CHARS_PER_TOKEN = 4;
 function valueText(value: unknown): string {
 	if (typeof value === "string") return value;
 	return JSON.stringify(value) ?? String(value);
+}
+
+/**
+ * Lay out the script's output so the model can tell items apart: providers join adjacent text
+ * blocks with a newline or with nothing. With more than one ordinary text item, each starts with
+ * a `==> text N/M <==` line. Unlike upstream's console.*, Python streams remain in emission order:
+ * each contiguous run becomes a `<console_output>` block where it occurred.
+ */
+function formatOutput(output: CodemodeOutputItem[]): (TextContent | ImageContent)[] {
+	const total = output.filter((item) => item.type === "text" && !item.console).length;
+	const items: (TextContent | ImageContent)[] = [];
+	let consoleLines: string[] = [];
+	let index = 0;
+	const flushConsole = () => {
+		if (consoleLines.length > 0) {
+			items.push({ type: "text", text: `<console_output>\n${consoleLines.join("\n")}\n</console_output>` });
+			consoleLines = [];
+		}
+	};
+	for (const item of output) {
+		if (item.type === "text" && item.console) {
+			consoleLines.push(item.text);
+			continue;
+		}
+		flushConsole();
+		if (item.type === "image") {
+			items.push(item);
+		} else {
+			index++;
+			items.push({ type: "text", text: total > 1 ? `==> text ${index}/${total} <==\n${item.text}` : item.text });
+		}
+	}
+	flushConsole();
+	return items;
+}
+
+/**
+ * Join adjacent text items into one, each part starting on its own line. The separator check looks
+ * at the last non-empty part, not the joined text: reading the end of a growing concatenation makes
+ * V8 copy it on every item, which is quadratic (#10678).
+ */
+function joinAdjacentText(items: (TextContent | ImageContent)[]): (TextContent | ImageContent)[] {
+	const joined: (TextContent | ImageContent)[] = [];
+	let parts: string[] = [];
+	let lastPart = "";
+	const flush = () => {
+		if (parts.length > 0) joined.push({ type: "text", text: parts.join("") });
+		parts = [];
+		lastPart = "";
+	};
+	for (const item of items) {
+		if (item.type !== "text") {
+			flush();
+			joined.push(item);
+			continue;
+		}
+		if (lastPart !== "" && !lastPart.endsWith("\n")) {
+			parts.push("\n");
+			lastPart = "\n";
+		}
+		parts.push(item.text);
+		if (item.text !== "") lastPart = item.text;
+	}
+	flush();
+	return joined;
 }
 
 /** Keep failure output separate without duplicating image payloads or unbounded text in details. */
@@ -449,9 +515,7 @@ export async function executeCodemode(
 		if (call.status === "running") call.status = "cancelled";
 	}
 
-	const items: (TextContent | ImageContent)[] = result.output.map((item) =>
-		item.type === "text" ? { type: "text", text: item.text } : item,
-	);
+	const scriptOutput = [...result.output];
 	if (result.ok) {
 		const { set, delete: deleted } = result.storeWrites;
 		if (Object.keys(set).length > 0 || deleted.length > 0) {
@@ -463,8 +527,9 @@ export async function executeCodemode(
 			});
 		}
 		// pi extension: a returned value is appended like text().
-		if (result.value !== undefined) items.push({ type: "text", text: valueText(result.value) });
+		if (result.value !== undefined) scriptOutput.push({ type: "text", text: valueText(result.value) });
 	}
+	const items = formatOutput(scriptOutput);
 	if (generatedImages > 0 && !items.some((item) => item.type === "image")) {
 		items.push({
 			type: "text",
@@ -475,10 +540,10 @@ export async function executeCodemode(
 	const maxOutputTokens = sourceOptions.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
 	const ordinaryOutput = !result.ok ? failureOutput(items, maxOutputTokens) : undefined;
 	if (!result.ok) items.push({ type: "text", text: `Script error:\n${formatError(result, calls)}` });
-	const truncated = await truncateOutput(items, maxOutputTokens);
+	const truncated = await truncateOutput(joinAdjacentText(items), maxOutputTokens);
 	// After truncation, which joins the text items and moves images after them, so each path stays
 	// next to its image and is never cut.
-	const output = await saveImages(truncated.items);
+	const output = joinAdjacentText(await saveImages(truncated.items));
 	const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
 	const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${wallTime} seconds\nOutput:\n`;
 	const details = snapshot();

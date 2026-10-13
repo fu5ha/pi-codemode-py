@@ -27,6 +27,28 @@ async function setup(options: Parameters<typeof createHarness>[0] = {}) {
 afterEach(() => { while (harnesses.length) harnesses.pop()!.cleanup(); });
 
 describe("Python codemode in the real Pi pipeline", () => {
+	// Upstream eb326d265: preserve Python stream chronology instead of moving console lines last.
+	it("marks where each text item starts and joins adjacent text with stream blocks in order", async () => {
+		const harness = await setup();
+		const result = await harness.run('text("one\\ntwo")\nprint("a")\nprint("b")\ntext("three\\n")\nreturn 4');
+		expect(result.content).toHaveLength(2);
+		expect(resultText(result)).toBe(
+			"==> text 1/3 <==\none\ntwo\n<console_output>\na\nb\n</console_output>\n==> text 2/3 <==\nthree\n==> text 3/3 <==\n4",
+		);
+	});
+
+	// Upstream #10678; Python's implicit None return adds one ordinary text item.
+	it("formats output at the item limit in linear time", async () => {
+		const harness = await setup();
+		const startedAt = performance.now();
+		const result = await harness.run('for i in range(100000):\n    text("")');
+		const elapsed = performance.now() - startedAt;
+		rmSync((result.details as unknown as CodemodeToolDetails).fullOutputPath ?? "", { force: true });
+		expect(result.isError).toBe(false);
+		expect(resultText(result)).toContain("==> text 100001/100001 <==");
+		expect(elapsed).toBeLessThan(5000);
+	});
+
 	it("presents callable tools per codemode.mode without disabling their nested-call availability", async () => {
 		const harness = await setup({ tools: [echo] });
 		harness.session.setActiveToolsByName(["read", "echo", CODEMODE_TOOL_NAME]);
@@ -118,7 +140,7 @@ for args in [{"text": "blocked"}, {}]:
 		expect(resultText(result)).toContain("ValueError: boom");
 		expect((result.details as unknown as CodemodeToolDetails).failure).toMatchObject({
 			error: { name: "ValueError", diagnostics: [{ name: "ValueError", frames: [{ line: 3, source: 'raise ValueError("boom")' }] }] },
-			output: [{ type: "text", text: '{"files":2}\necho: ok' }],
+			output: [{ type: "text", text: '==> text 1/2 <==\n{"files":2}\n==> text 2/2 <==\necho: ok' }],
 		});
 		expect(result.usage?.input).toBe(9);
 		expect(result.usage?.cost.total).toBeCloseTo(0.005);
