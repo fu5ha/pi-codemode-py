@@ -11,7 +11,7 @@
  *
  * Nested results are handed to the script as follows:
  * - A tool that declares `outputSchema` resolves to its `structuredContent`, also for error
- *   results that carry one (MCP tools resolve to their `CallToolResult`, including `isError`).
+ *   results that carry one.
  * - Any other tool resolves to its text content as one string.
  * - A failed, blocked, or invalid call rejects with an Error carrying the tool's error text.
  *
@@ -25,8 +25,6 @@ import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { CodemodeError, CodemodeJsonSchema, CodemodeTool } from "@fu5ha/pi-codemode-py";
 import {
-	MCP_PYTHON_PREAMBLE,
-	mcpStructuredContentSchema,
 	renderToolOutputType,
 	renderToolSample,
 	toCodemodeIdentifier,
@@ -145,7 +143,7 @@ export const CODEMODE_DOCS_PATH = fileURLToPath(new URL("./docs/codemode.md", im
 const DESCRIPTION_INTRO = `Run a Python script using the system python3 (3.12+) with full library and system access as well as a codemode tool interface for codemode-exposed pi and MCP server tools.
 This may be used both for general python scripts, codemode tool calling, or combining both together.
 Input is raw Python (not JSON, no code fence) and run as the body of an async function. \`asyncio\` is automatically imported, so top-level \`await\`, \`asyncio\` combinators, and \`return\` work. Standard libraries, filesystem, network, and timers are available.
-- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError. Calls still running when the script ends are cancelled; side effects are not undone.
+- \`await tools.<name>({"key": value})\` returns text or structured JSON according to its declaration. Failures raise RuntimeError, except tools that return structured JSON also resolve on failure when they returned that value; check its fields (such as \`exit_code\` or \`isError\`). Calls still running when the script ends are cancelled; side effects are not undone.
 - Pass tool arguments and helper options as dictionaries.
 - Optional first line configures script run parameters: \`# @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\`
 Read ${CODEMODE_DOCS_PATH} for the full Python interface, examples, and limits.`;
@@ -249,7 +247,7 @@ function selectCatalog(groups: readonly CatalogGroup[], budget: number | undefin
 
 /**
  * Model-facing description: the helper list, guidance for finding tools that are not listed, the
- * shared MCP types when listed tools need them, the `models` API, and one section per listed tool,
+ * `models` API, and one section per listed tool,
  * grouped by namespace. Deferred tools are never listed and do not affect the description at all, so
  * it stays the same while MCP servers connect or change their tools. Tool sections are limited to
  * `inlineBudget`.
@@ -276,14 +274,6 @@ export function createCodemodeDescription(
 	const shown = selectCatalog(ordered, options.inlineBudget);
 
 	const sections = [DESCRIPTION_INTRO, describeGlobals(options.models === true)];
-	if (
-		declarations.some(
-			(declaration) =>
-				shown.has(declaration.name) && mcpStructuredContentSchema(declaration.outputSchema) !== undefined,
-		)
-	) {
-		sections.push(`Shared MCP Types:\n\`\`\`python\n${MCP_PYTHON_PREAMBLE}\n\`\`\``);
-	}
 	if (declarations.length === 0) return sections.join("\n\n");
 
 	const toolSections = ["Nested tools:"];
@@ -306,26 +296,25 @@ export function createCodemodeDescription(
 	return sections.join("\n\n");
 }
 
-/**
- * What a script call resolves to, in one line: `a string`, the field names of an object
- * (`{ output, exit_code, full_output_path? }`), or the rendered type for anything else.
- */
+/** Object field names, with object-typed fields expanded depth levels deep. */
+function describeFields(schema: CodemodeJsonSchema | undefined, depth: number): string | undefined {
+	if (typeof schema !== "object" || schema === null) return undefined;
+	const { type, properties, required } = schema;
+	if (type !== "object" || typeof properties !== "object" || properties === null) return undefined;
+	const requiredNames = new Set(Array.isArray(required) ? required : []);
+	const fields = Object.entries(properties).map(([name, field]) => {
+		const nested = depth > 0 ? describeFields(field as CodemodeJsonSchema, depth - 1) : undefined;
+		return `${name}${requiredNames.has(name) ? "" : "?"}${nested ? `: ${nested}` : ""}`;
+	});
+	return `{ ${fields.join(", ")} }`;
+}
+
+/** What a script call resolves to: a string, object fields, or the rendered type otherwise. */
 function describeOutput(schema: CodemodeJsonSchema | undefined): string {
 	const type = renderToolOutputType(schema);
 	if (type === "str") return "a string";
-	const object = typeof schema === "object" ? schema : undefined;
-	const properties = object?.properties;
-	if (
-		object?.type === "object" &&
-		typeof properties === "object" &&
-		properties !== null &&
-		mcpStructuredContentSchema(schema) === undefined
-	) {
-		const required = new Set(Array.isArray(object.required) ? object.required : []);
-		const fields = Object.keys(properties).map((name) => (required.has(name) ? name : `${name}?`));
-		return `\`{ ${fields.join(", ")} }\``;
-	}
-	return `\`${type.replace(/\s+/g, " ")}\``;
+	const fields = describeFields(schema, 1);
+	return `\`${fields ?? type.replace(/\s+/g, " ")}\``;
 }
 
 /**

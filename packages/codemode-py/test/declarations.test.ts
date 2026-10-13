@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
-	MCP_PYTHON_PREAMBLE,
-	mcpStructuredContentSchema,
 	renderDeclarations,
 	renderToolOutputType,
 	renderToolSample,
@@ -220,27 +218,16 @@ describe("tool declarations", () => {
 		expect(renderToolSignature({ name: "free" })).toContain("async def free(args: Any) -> Any:");
 	});
 
-	it("renders MCP CallToolResult output schemas as CallToolResult[T]", () => {
+	// Upstream 24382bedd: result schemas no longer need shared MCP types.
+	it("renders output schemas shaped like an MCP CallToolResult as plain types", () => {
 		const rendered = renderToolSignature({
-			name: "mcp__sample__search",
-			inputSchema: { type: "object", properties: {}, additionalProperties: false },
-			outputSchema: mcpResultSchema({
-				type: "object",
-				properties: { results: { type: "array", items: { $ref: "#/definitions/Result~1item~0v1" } } },
-				required: ["results"], additionalProperties: false,
-				definitions: {
-					"Result/item~v1": {
-						type: "object", properties: { id: { type: "string" }, score: { type: "number" } },
-						required: ["id", "score"], additionalProperties: false,
-					},
-				},
-			}),
+			name: "plain",
+			inputSchema: { type: "object", properties: {} },
+			outputSchema: mcpResultSchema(),
 		});
-		expect(rendered).toContain(MCP_PYTHON_PREAMBLE);
-		expect(rendered).toContain('{"id": Required[str], "score": Required[int | float]}');
-		expect(rendered).toContain("-> CallToolResult[Codemode_mcp__sample__search_Result]:");
-		expect(renderToolOutputType(mcpResultSchema())).toBe("CallToolResult[Any]");
-		expect(mcpStructuredContentSchema({ type: "object", properties: { content: { type: "array" } } })).toBeUndefined();
+		expect(rendered).toContain('Codemode_plain_Result = TypedDict("Codemode_plain_Result", {"_meta": NotRequired[dict[str, Any]], "content": Required[list[dict[str, Any]]], "isError": NotRequired[bool]}, total=False)');
+		expect(rendered).toContain("async def plain(args: dict[str, Any]) -> Codemode_plain_Result:");
+		expect(renderToolOutputType(mcpResultSchema())).toBe('TypedDict("Schema", {"_meta": NotRequired[dict[str, Any]], "content": Required[list[dict[str, Any]]], "isError": NotRequired[bool]}, total=False)');
 	});
 
 	it("renders the per-tool sample", () => {
@@ -330,7 +317,7 @@ describe("renderDeclarations", () => {
 				},
 				{
 					name: "explicit",
-					signature: '(list: list[Literal["list"]], Literal: dict[str, Any] | None = None) -> CallToolResult[dict[str, Any]]',
+					signature: '(list: list[Literal["list"]], Literal: dict[str, Any] | None = None) -> dict[str, Any]',
 					execute,
 				},
 			],

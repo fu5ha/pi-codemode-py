@@ -18,32 +18,7 @@ const MAX_TAG_CHARS = 80;
 const LINE_TERMINATORS = /[\r\n\u2028\u2029]/g;
 const TYPING_NAMES = ["Any", "Awaitable", "Callable", "Literal", "Never", "NotRequired", "Required", "TypedDict"];
 const BUILTIN_NAMES = ["str", "int", "float", "bool", "list", "dict"];
-const MCP_NAMES = ["Role", "MetaObject", "Annotations", "Icon", "TextResourceContents", "BlobResourceContents",
-	"TextContent", "ImageContent", "AudioContent", "ResourceLink", "EmbeddedResource", "ContentBlock", "CallToolResult"];
-const IMPORTS = `from __future__ import annotations\nfrom typing import ${TYPING_NAMES.join(", ")}`;
 const EXACT_LOOKUP = '    def __getitem__(self, name: str) -> Callable[[Any], Awaitable[Any]]:\n        "Exact original-name lookup, including names that need attribute aliases."\n        ...';
-
-/** Python 3.12 MCP result types. Functional TypedDict preserves JSON keys without aliasing them. */
-export const MCP_PYTHON_PREAMBLE = `${IMPORTS}
-
-Role = Literal["user", "assistant"]
-MetaObject = dict[str, Any]
-Annotations = TypedDict("Annotations", {"audience": list[Role], "priority": float, "lastModified": str}, total=False)
-Icon = TypedDict("Icon", {"src": Required[str], "mimeType": str, "sizes": list[str], "theme": Literal["light", "dark"]}, total=False)
-TextResourceContents = TypedDict("TextResourceContents", {"uri": Required[str], "mimeType": str, "_meta": MetaObject, "text": Required[str]}, total=False)
-BlobResourceContents = TypedDict("BlobResourceContents", {"uri": Required[str], "mimeType": str, "_meta": MetaObject, "blob": Required[str]}, total=False)
-TextContent = TypedDict("TextContent", {"type": Required[Literal["text"]], "text": Required[str], "annotations": Annotations, "_meta": MetaObject}, total=False)
-ImageContent = TypedDict("ImageContent", {"type": Required[Literal["image"]], "data": Required[str], "mimeType": Required[str], "annotations": Annotations, "_meta": MetaObject}, total=False)
-AudioContent = TypedDict("AudioContent", {"type": Required[Literal["audio"]], "data": Required[str], "mimeType": Required[str], "annotations": Annotations, "_meta": MetaObject}, total=False)
-ResourceLink = TypedDict("ResourceLink", {"type": Required[Literal["resource_link"]], "name": Required[str], "uri": Required[str], "icons": list[Icon], "title": str, "description": str, "mimeType": str, "annotations": Annotations, "size": int, "_meta": MetaObject}, total=False)
-EmbeddedResource = TypedDict("EmbeddedResource", {"type": Required[Literal["resource"]], "resource": Required[TextResourceContents | BlobResourceContents], "annotations": Annotations, "_meta": MetaObject}, total=False)
-ContentBlock = TextContent | ImageContent | AudioContent | ResourceLink | EmbeddedResource
-
-class CallToolResult[TStructured](TypedDict):
-    content: list[ContentBlock]
-    isError: NotRequired[bool]
-    structuredContent: NotRequired[TStructured]
-    _meta: NotRequired[MetaObject]`;
 
 export interface RenderDeclarationsOptions {
 	tools?: readonly CodemodeTool[];
@@ -54,7 +29,6 @@ interface RenderState {
 	definitions: string[];
 	usedNames: Set<string>;
 	next: number;
-	mcp: boolean;
 	inline: boolean;
 	/** Alternate bindings for annotation names shadowed by globals or namespace members. */
 	aliases: Map<string, string>;
@@ -62,11 +36,11 @@ interface RenderState {
 
 function state(inline = false, names: string[] = []): RenderState {
 	const render: RenderState = {
-		definitions: [], next: 0, mcp: false, inline,
-		usedNames: new Set([...TYPING_NAMES, ...BUILTIN_NAMES, ...MCP_NAMES, "Tools", ...names]),
+		definitions: [], next: 0, inline,
+		usedNames: new Set([...TYPING_NAMES, ...BUILTIN_NAMES, "Tools", ...names]),
 		aliases: new Map(),
 	};
-	for (const name of [...TYPING_NAMES, ...BUILTIN_NAMES, ...MCP_NAMES]) {
+	for (const name of [...TYPING_NAMES, ...BUILTIN_NAMES]) {
 		if (names.includes(name)) render.aliases.set(name, newName(render, name));
 	}
 	return render;
@@ -84,16 +58,7 @@ function moduleText(render: RenderState, sections: string[]): string {
 	const imports = `from __future__ import annotations\nfrom typing import ${TYPING_NAMES.map((name) => binding(render, name)).join(", ")}`;
 	const builtins = BUILTIN_NAMES.filter((name) => render.aliases.has(name));
 	const importSection = imports + (builtins.length ? `\nfrom builtins import ${builtins.map((name) => binding(render, name)).join(", ")}` : "");
-	let preamble = "";
-	if (render.mcp) {
-		preamble = qualify(MCP_PYTHON_PREAMBLE.slice(IMPORTS.length), render);
-		// Functional TypedDict names must agree with their assigned aliases for type checkers.
-		for (const name of MCP_NAMES) {
-			const alias = render.aliases.get(name);
-			if (alias) preamble = preamble.replaceAll(`("${name}",`, `("${alias}",`);
-		}
-	}
-	return [importSection + preamble, ...render.definitions.map((definition) => qualify(definition, render)), ...sections].join("\n\n");
+	return [importSection, ...render.definitions.map((definition) => qualify(definition, render)), ...sections].join("\n\n");
 }
 
 function binding(render: RenderState, name: string): string {
@@ -178,7 +143,7 @@ export function renderToolSignature(
 	validateToolNames([tool]);
 	const render = state(false, [toCodemodeIdentifier(tool.name)]);
 	const input = renderSchema(tool.inputSchema, render, `${tool.name}_Args`, options.inputMaxChars ?? DEFAULT_INPUT_SCHEMA_MAX_CHARS);
-	const output = outputType(tool.outputSchema, render, `${tool.name}_Result`);
+	const output = renderSchema(tool.outputSchema, render, `${tool.name}_Result`);
 	return moduleText(render, [`async def ${toCodemodeIdentifier(tool.name)}(args: ${input}) -> ${output}:\n    ...`]);
 }
 
@@ -190,33 +155,14 @@ export function renderToolSample(
 	validateToolNames([tool]);
 	const render = state(false, [toCodemodeIdentifier(tool.name)]);
 	const input = renderSchema(tool.inputSchema, render, `${tool.name}_Args`, options.inputMaxChars ?? DEFAULT_INPUT_SCHEMA_MAX_CHARS);
-	const output = outputType(tool.outputSchema, render, `${tool.name}_Result`);
+	const output = renderSchema(tool.outputSchema, render, `${tool.name}_Result`);
 	const declaration = moduleText(render, [`class Tools:\n    async def ${toCodemodeIdentifier(tool.name)}(self, args: ${input}) -> ${output}:\n        ...\n\n${qualify(EXACT_LOOKUP, render)}\n\ntools: Tools`]);
 	return `${tool.description?.trim() ?? ""}\n\ncodemode tool declaration:\n\`\`\`python\n${declaration}\n\`\`\``;
 }
 
-/** Detect the structured content of an MCP CallToolResult, preserving the upstream heuristic. */
-export function mcpStructuredContentSchema(schema: CodemodeJsonSchema | undefined): CodemodeJsonSchema | undefined {
-	if (!isObject(schema) || !isObject(schema.properties)) return undefined;
-	const { content, isError, _meta, structuredContent } = schema.properties;
-	if (!isObject(content) || content.type !== "array" || !isObject(content.items) || content.items.type !== "object") return undefined;
-	if (!isObject(isError) || isError.type !== "boolean" || !isObject(_meta) || _meta.type !== "object") return undefined;
-	return isObject(structuredContent) || typeof structuredContent === "boolean" ? structuredContent : true;
-}
-
-function outputType(schema: CodemodeJsonSchema | undefined, render: RenderState, hint: string): string {
-	const structured = mcpStructuredContentSchema(schema);
-	if (structured !== undefined) {
-		render.mcp = true;
-		// A nested structured schema is its own reference root, matching upstream behavior.
-		return `${qualify("CallToolResult", render)}[${renderSchema(structured, render, hint)}]`;
-	}
-	return renderSchema(schema, render, hint);
-}
-
-/** Python annotation expression. MCP annotations require MCP_PYTHON_PREAMBLE in their scope. */
+/** Python annotation expression rendered directly from the output schema, or Any without one. */
 export function renderToolOutputType(schema: CodemodeJsonSchema | undefined): string {
-	return outputType(schema, state(true), "Result");
+	return schema === undefined ? "Any" : schemaToType(schema);
 }
 
 function functionStub(tool: CodemodeTool, render: RenderState, indent = "", method = false, global = false): string {
@@ -232,7 +178,7 @@ function functionStub(tool: CodemodeTool, render: RenderState, indent = "", meth
 		if (method) signature = signature.replace(/^\(/, "(self, ").replace("(self, )", "(self)");
 	} else {
 		const input = renderSchema(tool.inputSchema, render, `${tool.name}_Args`, DEFAULT_INPUT_SCHEMA_MAX_CHARS);
-		const output = outputType(tool.outputSchema, render, `${tool.name}_Result`);
+		const output = renderSchema(tool.outputSchema, render, `${tool.name}_Result`);
 		signature = `(${method ? "self, " : ""}${global && tool.spread ? `*args: ${qualify("Any", render)}` : `args: ${input}`}) -> ${output}`;
 	}
 	const description = tool.description?.trim();

@@ -14,7 +14,7 @@ type Harness = Awaited<ReturnType<typeof createHarness>>;
 const harnesses: Harness[] = [];
 afterEach(() => { while (harnesses.length) harnesses.pop()!.cleanup(); });
 
-/** Upstream's fake server, narrowed to the one tool these readiness scenarios call. */
+/** Upstream's fake server, narrowed to search and failure result scenarios. */
 function createFakeServer(calls: string[], initializeDelayMs: number) {
 	const pair = createInMemoryTransportPair();
 	const respond = (request: JsonRpcRequest): unknown => {
@@ -31,10 +31,14 @@ function createFakeServer(calls: string[], initializeDelayMs: number) {
 					outputSchema: {
 						type: "object", properties: { hits: { type: "array", items: { type: "string" } } }, required: ["hits"],
 					},
+				}, {
+					name: "fail", description: "Fail the call.",
+					inputSchema: { type: "object", properties: {} },
 				}] };
 			case "tools/call": {
 				const params = request.params as { name: string; arguments: { query: string } };
 				calls.push(`${params.name}:${JSON.stringify(params.arguments)}`);
+				if (params.name === "fail") return { content: [{ type: "text", text: "failed" }], isError: true };
 				const hits = [`${params.arguments.query} guide`, `${params.arguments.query} faq`];
 				return { content: [{ type: "text", text: hits.join("\n") }], structuredContent: { hits } };
 			}
@@ -52,7 +56,7 @@ function createFakeServer(calls: string[], initializeDelayMs: number) {
 }
 
 async function setupSlow(initializeDelayMs: number, options: {
-	name?: string; factories?: ExtensionFactory[]; initialActiveToolNames?: string[];
+	name?: string; factories?: ExtensionFactory[]; initialActiveToolNames?: string[]; exposure?: "direct" | "codemode";
 } = {}) {
 	const calls: string[] = [];
 	const harness = await createHarness({
@@ -61,7 +65,7 @@ async function setupSlow(initializeDelayMs: number, options: {
 			...(options.factories ?? []),
 			createMcpExtension({
 				loadConfig: () => ({
-					servers: [{ name: options.name ?? "slow", config: { url: "http://unused.invalid" }, source: "test" }],
+					servers: [{ name: options.name ?? "slow", config: { url: "http://unused.invalid", exposure: options.exposure ?? "codemode" }, source: "test" }],
 					errors: [],
 				}),
 				createTransport: () => {
@@ -80,6 +84,25 @@ const resultText = (result: { content: { type: string; text?: string }[] }) =>
 	result.content.filter((item) => item.type === "text").slice(1).map((item) => item.text).join("\n");
 
 describe("Python codemode MCP reachability", () => {
+	// Upstream 24382bedd.
+	it("tells scripts what directly exposed MCP tools resolve to", async () => {
+		const { harness } = await setupSlow(0, { name: "docs", exposure: "direct" });
+		await harness.run('return await tools.mcp__docs__search({"query": "q"})');
+		harness.session.setActiveToolsByName(["exec_python", "mcp__docs__search", "mcp__docs__fail"]);
+		const search = harness.session.agent.state.tools.find((tool) => tool.name === "mcp__docs__search");
+		const fail = harness.session.agent.state.tools.find((tool) => tool.name === "mcp__docs__fail");
+		expect(search?.description).toContain(
+			"Codemode: `await tools.mcp__docs__search(args)` returns `{ content, structuredContent?: { hits }, isError? }`.",
+		);
+		expect(fail?.description).toContain(
+			"Codemode: `await tools.mcp__docs__fail(args)` returns `{ content, structuredContent?, isError? }`.",
+		);
+		harness.settingsManager.applyOverrides({ codemode: { mode: "only" } });
+		harness.session.setActiveToolsByName(["exec_python", "mcp__docs__search", "mcp__docs__fail"]);
+		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "exec_python");
+		expect(codemode?.description).not.toContain("Shared MCP Types:");
+	});
+
 	it("activates another extension's codemode tool when it reaches other tools", async () => {
 		// Pi's auto-activation contract recognizes `codemode`, not our `exec_python` name.
 		const { harness } = await setupSlow(0, {

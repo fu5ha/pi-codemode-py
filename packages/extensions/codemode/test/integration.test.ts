@@ -210,7 +210,7 @@ for args in [{"text": "blocked"}, {}]:
 	it("discovers deferred namespace tools using callable Python aliases and Python declarations", async () => {
 		const harness = await setup({ tools: [{
 			...echo, name: "mcp__test-server__class", exposure: "deferred",
-			namespace: { name: "mcp__test-server", description: "Search metadata.", instructions: "Be careful." },
+			namespace: { name: "mcp__test-server", aliases: ["test-server"], description: "Search metadata.", instructions: "Be careful." },
 		}] });
 		const result = await harness.run(`
 matches = await searchTools("Echo", {"namespace": "test-server"})

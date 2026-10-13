@@ -562,14 +562,14 @@ export async function executeCodemode(
 }
 
 /**
- * Whether `query` names the namespace: its name, its script identifier (`mcp__dev-radius` is
- * `mcp__dev_radius`), or the part after its last `__` in either form (`dev-radius`, `dev_radius`).
+ * Whether `query` names the namespace: its name or one of its aliases, as written or as the same
+ * script identifier (`mcp__dev-radius` is `mcp__dev_radius`).
  */
-function isNamespaceName(namespace: string, query: string): boolean {
-	const id = toCodemodeIdentifier(namespace);
+function isNamespaceName(namespace: ToolNamespace, query: string): boolean {
 	const queryId = toCodemodeIdentifier(query);
-	const suffix = (name: string) => (name.includes("__") ? name.slice(name.lastIndexOf("__") + 2) : undefined);
-	return namespace === query || id === queryId || suffix(namespace) === query || suffix(id) === queryId;
+	return [namespace.name, ...(namespace.aliases ?? [])].some(
+		(name) => name === query || toCodemodeIdentifier(name) === queryId,
+	);
 }
 
 /**
@@ -600,7 +600,7 @@ function createDiscoveryGlobals(
 				}
 				const documents = tools.flatMap((tool) => {
 					const toolNamespace = options.getToolNamespace?.(tool.name);
-					if (namespace && (!toolNamespace || !isNamespaceName(toolNamespace.name, namespace))) return [];
+					if (namespace && (!toolNamespace || !isNamespaceName(toolNamespace, namespace))) return [];
 					return [createToolSearchDocument(tool, toolNamespace)];
 				});
 				return ranker.rank(query, documents, limit).map((match) => entry(match.name));
@@ -628,7 +628,7 @@ function createDiscoveryGlobals(
 				const names: string[] = [];
 				for (const tool of tools) {
 					const toolNamespace = options.getToolNamespace?.(tool.name);
-					if (!toolNamespace || !isNamespaceName(toolNamespace.name, name)) continue;
+					if (!toolNamespace || !isNamespaceName(toolNamespace, name)) continue;
 					namespace ??= toolNamespace;
 					names.push(toCodemodeIdentifier(tool.name));
 				}
