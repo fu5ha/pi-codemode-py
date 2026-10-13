@@ -374,6 +374,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
 	};
 }
 
+/** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
+const DISCOVERY_GLOBALS = /\b(searchTools|describeNamespace|describeTool|ALL_TOOLS)\b/;
+/** Python's dynamic attribute lookup can call tools whose names do not appear in the source. */
+const DYNAMIC_TOOL_LOOKUP = /\bgetattr\s*\(\s*tools\b/;
+
+/**
+ * The tools a script may call (`ToolDefinition.reachesTools`): every tool when it uses discovery or
+ * dynamic attribute lookup, else the words of its source, like upstream codemode. MCP uses these
+ * words to finish registering the named servers' tools before the callable snapshot is taken.
+ */
+function getScriptReach(code: unknown): "all" | readonly string[] {
+	if (typeof code !== "string") return [];
+	return DISCOVERY_GLOBALS.test(code) || DYNAMIC_TOOL_LOOKUP.test(code) ? "all" : (code.match(/\w+/g) ?? []);
+}
+
 export function createCodemodeToolDefinition(
 	options: CodemodeToolOptions = {},
 ): ToolDefinition<typeof codemodeSchema, CodemodeToolDetails | undefined> {
@@ -389,6 +404,7 @@ export function createCodemodeToolDefinition(
 		exposure: "model-only",
 		executionMode: "sequential",
 		prepareLoadout: (loadout) => prepareCodemodeLoadout(loadout, options),
+		reachesTools: (input) => getScriptReach(input.code),
 		// Capable models write the script as raw text instead of a JSON-escaped string.
 		constrainedSampling: { type: "grammar", variants: { openai_lark: CODEMODE_SOURCE_GRAMMAR } },
 		// Python runtime code loads on the first call; no process starts at extension load time.
@@ -422,6 +438,7 @@ export function createCodemodeTool(
 		description: createCodemodeDescription(tools, { models: options.models === true }),
 		promptSnippet: definition.promptSnippet,
 		promptGuidelines: definition.promptGuidelines,
+		reachesTools: definition.reachesTools,
 	});
 	return tool;
 }

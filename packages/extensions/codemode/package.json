@@ -18,15 +18,16 @@
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-agent-core": "*",
-		"@earendil-works/pi-coding-agent": ">=1.0.2 <2",
+		"@earendil-works/pi-coding-agent": ">=1.2.0 <2",
 		"@earendil-works/pi-tui": "*",
 		"typebox": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "1.0.2",
-		"@earendil-works/pi-agent-core": "1.0.2",
-		"@earendil-works/pi-coding-agent": "1.0.2",
-		"@earendil-works/pi-tui": "1.0.2",
+		"@earendil-works/pi-ai": "1.2.0",
+		"@earendil-works/pi-agent-core": "1.2.0",
+		"@earendil-works/pi-coding-agent": "1.2.0",
+		"@earendil-works/pi-mcp": "1.2.0",
+		"@earendil-works/pi-tui": "1.2.0",
 		"typebox": "^1.1.24",
 		"@types/node": "22.19.19",
 		"typescript": "7.0.2",

@@ -16,6 +16,7 @@ import { CODEMODE_TOOL_NAME } from "../tool.ts";
 
 export async function createHarness(options: {
 	factories?: ExtensionFactory[]; tools?: ToolDefinition<any>[]; mode?: "on" | "only";
+	initialActiveToolNames?: string[];
 } = {}) {
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-python-suite-"));
 	const faux = registerFauxProvider();
@@ -39,7 +40,7 @@ export async function createHarness(options: {
 	if (loaded.errors.length) throw new Error(JSON.stringify(loaded.errors));
 	const manager = SessionManager.inMemory(tempDir);
 	const settingsManager = SettingsManager.inMemory({
-		defaultTools: [CODEMODE_TOOL_NAME, ...(options.tools ?? []).filter((tool) => !tool.exposure || tool.exposure === "direct").map((tool) => tool.name)],
+		defaultTools: options.initialActiveToolNames ?? [CODEMODE_TOOL_NAME, ...(options.tools ?? []).filter((tool) => !tool.exposure || tool.exposure === "direct").map((tool) => tool.name)],
 	});
 	const { session } = await createAgentSession({
 		cwd: tempDir, agentDir: tempDir, modelRuntime: runtime, model,
@@ -53,6 +54,7 @@ export async function createHarness(options: {
 	session.subscribe((event) => events.push(event));
 	return {
 		session, manager, runtime, settingsManager, tempDir, events,
+		setResponses: faux.setResponses,
 		getRequestTools: () => requestTools,
 		getRequestPrompt: () => requestPrompt,
 		async run(code: string) {
