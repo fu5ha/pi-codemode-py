@@ -7,6 +7,15 @@ export { toCodemodeIdentifier };
 export const DEFAULT_INPUT_SCHEMA_MAX_CHARS = 16_000;
 const MAX_REF_EXPANSIONS = 32;
 const MAX_DEPTH = 64;
+/** Constraints Python annotations cannot express, rendered as property comment tags. */
+const TAG_KEYWORDS = [
+	"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf",
+	"minLength", "maxLength", "pattern", "format", "minItems", "maxItems",
+];
+const LOWER_BOUNDS = new Set(["minimum", "exclusiveMinimum", "minLength", "minItems"]);
+const UPPER_BOUNDS = new Set(["maximum", "exclusiveMaximum", "maxLength", "maxItems"]);
+const MAX_TAG_CHARS = 80;
+const LINE_TERMINATORS = /[\r\n\u2028\u2029]/g;
 const TYPING_NAMES = ["Any", "Awaitable", "Callable", "Literal", "Never", "NotRequired", "Required", "TypedDict"];
 const BUILTIN_NAMES = ["str", "int", "float", "bool", "list", "dict"];
 const MCP_NAMES = ["Role", "MetaObject", "Annotations", "Icon", "TextResourceContents", "BlobResourceContents",
@@ -248,12 +257,14 @@ interface SchemaContext {
 	budget: { expansions: number };
 	depth: number;
 	render: RenderState;
+	tags: boolean;
 }
 
 /**
  * Python annotation expression; object shapes use functional TypedDict expressions.
  * For named definitions suitable for type checkers, use renderDeclarations instead.
  * Recursive/remote refs and unrepresentable intersections use Any. Budgets include shape text.
+ * Over-budget schemas render again without constraint tags before falling back to Any.
  */
 export function schemaToType(schema: CodemodeJsonSchema, options: { maxChars?: number } = {}): string {
 	return renderSchema(schema, state(true), "Schema", options.maxChars);
@@ -263,14 +274,21 @@ function renderSchema(schema: CodemodeJsonSchema | undefined, render: RenderStat
 	if (schema === undefined) return qualify("Any", render);
 	const before = render.definitions.length;
 	const names = new Set(render.usedNames);
-	const type = toType(schema, { root: schema, resolving: new Set(), budget: { expansions: 0 }, depth: 0, render }, hint);
-	const size = type.length + render.definitions.slice(before).join("\n\n").length;
-	if (maxChars !== undefined && size > maxChars) {
+	const next = render.next;
+	const reset = () => {
 		render.definitions.length = before;
-		render.usedNames = names;
-		return qualify("Any", render);
+		render.usedNames = new Set(names);
+		render.next = next;
+	};
+	for (const tags of [true, false]) {
+		const type = toType(schema, {
+			root: schema, resolving: new Set(), budget: { expansions: 0 }, depth: 0, render, tags,
+		}, hint);
+		const size = type.length + render.definitions.slice(before).join("\n\n").length;
+		if (maxChars === undefined || size <= maxChars) return qualify(type, render);
+		reset();
 	}
-	return qualify(type, render);
+	return qualify("Any", render);
 }
 
 function resolveRef(ref: string, root: CodemodeJsonSchema): CodemodeJsonSchema | undefined {
@@ -345,6 +363,42 @@ function arrayType(schema: Record<string, unknown>, context: SchemaContext, hint
 	return `list[${union(types)}]`;
 }
 
+/** Keep the upstream constraint extraction rules; Python int already expresses integer types. */
+function constraintTags(schema: unknown): string {
+	if (!isObject(schema)) return "";
+	const property = schema;
+	const variants = Array.isArray(property.anyOf) ? property.anyOf : property.oneOf;
+	const nonNull = Array.isArray(variants) ? variants.filter((variant) => variant?.type !== "null") : [];
+	const branch = nonNull.length === 1 ? nonNull[0] : undefined;
+	const branches = isObject(branch) ? [property, branch] : [property];
+	// Draft-04 and OpenAPI 3.0 express exclusivity with boolean keywords.
+	const schemas = branches.map((schema): Record<string, unknown> => ({
+		...schema,
+		...(schema.exclusiveMinimum === true ? { minimum: undefined, exclusiveMinimum: schema.minimum } : {}),
+		...(schema.exclusiveMaximum === true ? { maximum: undefined, exclusiveMaximum: schema.maximum } : {}),
+	}));
+	const tags: string[] = [];
+	for (const keyword of TAG_KEYWORDS) {
+		const values = schemas.map((schema) => schema[keyword]);
+		if (LOWER_BOUNDS.has(keyword) || UPPER_BOUNDS.has(keyword)) {
+			const numbers = values.filter((value): value is number => typeof value === "number");
+			if (numbers.length === 0) continue;
+			tags.push(`@${keyword} ${LOWER_BOUNDS.has(keyword) ? Math.max(...numbers) : Math.min(...numbers)}`);
+			continue;
+		}
+		for (const value of new Set(values)) {
+			if (typeof value === "number" || typeof value === "string") tags.push(`@${keyword} ${value}`);
+		}
+	}
+	if (schemas.some((schema) => schema.uniqueItems === true)) tags.push("@uniqueItems");
+	// Annotations, unlike constraints, come from the property itself.
+	if (property.default !== undefined && property.default !== null) tags.push(`@default ${JSON.stringify(property.default)}`);
+	if (property.deprecated === true) tags.push("@deprecated");
+	return tags.filter((tag) => tag.length <= MAX_TAG_CHARS)
+		.map((tag) => tag.replace(LINE_TERMINATORS, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`))
+		.join(" ");
+}
+
 function objectType(schema: Record<string, unknown>, context: SchemaContext, hint: string): string {
 	const properties = isObject(schema.properties) ? schema.properties : {};
 	const names = Object.keys(properties).sort();
@@ -360,18 +414,27 @@ function objectType(schema: Record<string, unknown>, context: SchemaContext, hin
 		return `${JSON.stringify(name)}: ${required.has(name) ? "Required" : "NotRequired"}[${type}]`;
 	});
 	const typeName = context.render.inline ? "Schema" : newName(context.render, hint);
-	const descriptionLines: string[] = [];
-	for (const name of names) {
+	const comments = names.map((name) => {
+		const lines: string[] = [];
 		const property = properties[name];
 		if (isObject(property) && typeof property.description === "string") {
-			for (const line of property.description.trim().split(/\r\n?|\n/)) {
-				descriptionLines.push(`# ${JSON.stringify(name)}: ${line.replaceAll("\0", "\\0")}`);
+			for (const line of property.description.trim().split(LINE_TERMINATORS)) {
+				lines.push(`# ${JSON.stringify(name)}: ${line.replaceAll("\0", "\\0")}`);
 			}
 		}
-	}
+		const tags = context.tags ? constraintTags(property) : "";
+		if (tags) lines.push(`# ${JSON.stringify(name)}: ${tags}`);
+		return lines;
+	});
+	const descriptionLines = comments.flat();
 	if (schema.additionalProperties !== false) descriptionLines.push("# Additional JSON keys may be present; Python 3.12 TypedDict cannot type extra keys.");
 	const expression = `TypedDict(${JSON.stringify(typeName)}, {${fields.join(", ")}}, total=False)`;
-	if (context.render.inline) return expression;
+	if (context.render.inline) {
+		if (!comments.some((lines) => lines.length)) return expression;
+		const members = fields.map((field, index) => [...comments[index], `${field},`]
+			.map((line) => `    ${line.replaceAll("\n", "\n    ")}`).join("\n"));
+		return `TypedDict(${JSON.stringify(typeName)}, {\n${members.join("\n")}\n}, total=False)`;
+	}
 	context.render.definitions.push([...descriptionLines, `${typeName} = ${expression}`].join("\n"));
 	return typeName;
 }

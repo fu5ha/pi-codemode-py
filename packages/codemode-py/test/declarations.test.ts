@@ -71,6 +71,105 @@ describe("schemaToType", () => {
 		expect(rendered).toContain("Required[list[Codemode_weather_Args_weather_Item]]");
 	});
 
+	// Ported from Pi v1.2.0 declarations tests (upstream #10707).
+	it("puts constraints the type cannot express on property comment lines", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				timeoutMs: { type: "integer", minimum: 0, maximum: 30000, default: 0, description: "Wait in milliseconds." },
+				id: { type: "string", pattern: "^[a-z]+$", maxLength: 8 },
+				tags: { type: "array", items: { type: "string" }, maxItems: 5, uniqueItems: true, deprecated: true },
+				name: { type: "string" },
+			},
+			required: ["id"],
+		};
+		const rendered = schemaToType(schema);
+		expect(rendered).toBe([
+			'TypedDict("Schema", {',
+			'    # "id": @maxLength 8 @pattern ^[a-z]+$',
+			'    "id": Required[str],',
+			'    "name": NotRequired[str],',
+			'    # "tags": @maxItems 5 @uniqueItems @deprecated',
+			'    "tags": NotRequired[list[str]],',
+			'    # "timeoutMs": Wait in milliseconds.',
+			'    # "timeoutMs": @minimum 0 @maximum 30000 @default 0',
+			'    "timeoutMs": NotRequired[int],',
+			'}, total=False)',
+		].join("\n"));
+		const declaration = renderToolSignature({ name: "constrained", inputSchema: schema });
+		expect(declaration).toContain('# "timeoutMs": @minimum 0 @maximum 30000 @default 0');
+		expect(declaration).not.toContain("@integer");
+	});
+
+	it("reads constraints of optional fields from the non-null branch", () => {
+		expect(schemaToType({
+			type: "object", properties: {
+				limit: {
+					anyOf: [{ type: "integer", minimum: 1, maximum: 100 }, { type: "null" }],
+					default: null, title: "Limit",
+				},
+			},
+		})).toBe([
+			'TypedDict("Schema", {',
+			'    # "limit": @minimum 1 @maximum 100',
+			'    "limit": NotRequired[int | None],',
+			'}, total=False)',
+		].join("\n"));
+		expect(schemaToType({
+			type: "object", properties: {
+				n: {
+					anyOf: [{ type: "integer", minimum: 10, maximum: 50, format: "int32" }, { type: "null" }],
+					minimum: 0, maximum: 20, format: "port",
+				},
+			},
+		})).toContain('# "n": @minimum 10 @maximum 20 @format port @format int32');
+	});
+
+	it("reads draft-04 boolean exclusive bounds", () => {
+		const rendered = schemaToType({
+			type: "object", properties: {
+				n: { type: "integer", minimum: 0, exclusiveMinimum: true, maximum: 10, exclusiveMaximum: false },
+				m: { anyOf: [{ type: "number", maximum: 5, exclusiveMaximum: true }, { type: "null" }], maximum: 8 },
+			},
+		});
+		expect(rendered).toContain('# "m": @maximum 8 @exclusiveMaximum 5');
+		expect(rendered).toContain('# "n": @exclusiveMinimum 0 @maximum 10');
+	});
+
+	it("leaves out long tags and escapes line terminators", () => {
+		expect(schemaToType({
+			type: "object", properties: { config: { type: "object", default: { text: "x".repeat(100) } } },
+		})).toBe('TypedDict("Schema", {"config": NotRequired[dict[str, Any]]}, total=False)');
+		expect(schemaToType({
+			type: "object", properties: {
+				sep: { type: "string", pattern: "^[\r\n\u2028\u2029]$", default: "\u2028", description: "a\u2028b" },
+			},
+		})).toBe([
+			'TypedDict("Schema", {',
+			'    # "sep": a',
+			'    # "sep": b',
+			'    # "sep": @pattern ^[\\u000d\\u000a\\u2028\\u2029]$ @default "\\u2028"',
+			'    "sep": NotRequired[str],',
+			'}, total=False)',
+		].join("\n"));
+	});
+
+	it("drops constraint tags before rendering a type over the budget as Any", () => {
+		const schema = { type: "object", properties: { n: { type: "integer", minimum: 1 } } };
+		const untagged = 'TypedDict("Schema", {"n": NotRequired[int]}, total=False)';
+		expect(schemaToType(schema)).toContain('# "n": @minimum 1');
+		expect(schemaToType(schema, { maxChars: untagged.length })).toBe(untagged);
+		expect(schemaToType(schema, { maxChars: 10 })).toBe("Any");
+		// Named Python shapes count supporting definitions toward the same budget.
+		const plain = renderToolSignature({ name: "small", inputSchema: {
+			type: "object", properties: { n: { type: "integer" } },
+		} });
+		const budget = 'Codemode_small_Args'.length
+			+ 'Codemode_small_Args = TypedDict("Codemode_small_Args", {"n": NotRequired[int]}, total=False)'.length
+			+ '# Additional JSON keys may be present; Python 3.12 TypedDict cannot type extra keys.\n'.length;
+		expect(renderToolSignature({ name: "small", inputSchema: schema }, { inputMaxChars: budget })).toBe(plain);
+	});
+
 	it("resolves local references and stops at recursive ones", () => {
 		const schema = {
 			type: "object", properties: {
