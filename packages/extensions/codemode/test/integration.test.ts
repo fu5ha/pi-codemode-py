@@ -29,19 +29,37 @@ afterEach(() => { while (harnesses.length) harnesses.pop()!.cleanup(); });
 describe("Python codemode in the real Pi pipeline", () => {
 	it("presents callable tools per codemode.mode without disabling their nested-call availability", async () => {
 		const harness = await setup({ tools: [echo] });
+		harness.session.setActiveToolsByName(["read", "echo", CODEMODE_TOOL_NAME]);
 		const description = (name: string) => harness.session.agent.state.tools.find((tool) => tool.name === name)?.description ?? "";
 		expect(description("echo")).toContain("Codemode: `await tools.echo(args)` returns");
 		expect(description(CODEMODE_TOOL_NAME)).not.toContain("### `echo`");
 		await harness.run('return await tools.echo({"text": "on"})');
 		expect(harness.getRequestTools()).toContain("echo");
+		expect(harness.getRequestPrompt()).toContain("\n- read: ");
 		harness.settingsManager.applyOverrides({ codemode: { mode: "only" } });
-		harness.session.setActiveToolsByName(["echo", CODEMODE_TOOL_NAME]);
+		harness.session.setActiveToolsByName(["read", "echo", CODEMODE_TOOL_NAME]);
 		expect(description(CODEMODE_TOOL_NAME)).toContain("### `echo`");
 		expect(resultText(await harness.run('return await tools.echo({"text": "only"})'))).toBe("echo: only");
 		expect(harness.getRequestTools()).not.toContain("echo");
 		expect(harness.getRequestPrompt()).not.toContain("\n- echo: ");
+		// Upstream #10343: hidden tools' guidelines move from rules to codemode sections.
+		expect(harness.getRequestTools()).not.toContain("read");
+		expect(harness.getRequestPrompt()).not.toContain("\n- read: ");
+		expect(harness.getRequestPrompt()).not.toContain("Use read to examine files");
+		expect(description(CODEMODE_TOOL_NAME)).toContain("- Use read to examine files instead of cat or sed.");
 		harness.session.setActiveToolsByName(["echo"]);
 		expect(description("echo")).toBe("Echo text.");
+	});
+
+	// Ported from upstream #10343.
+	it("shows the guidelines of tools that do not fit the inline budget through describeTool()", async () => {
+		const harness = await setup();
+		harness.settingsManager.applyOverrides({ codemode: { mode: "only", inlineBudget: 0 } });
+		harness.session.setActiveToolsByName(["read", CODEMODE_TOOL_NAME]);
+		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === CODEMODE_TOOL_NAME);
+		expect(codemode?.description).not.toContain("### `read`");
+		const result = await harness.run('text(await describeTool("read"))');
+		expect(resultText(result)).toContain("- Use read to examine files instead of cat or sed.");
 	});
 
 	it("calls tools with validation, tool_call/tool_result hooks and parent ids, without nested transcript results", async () => {

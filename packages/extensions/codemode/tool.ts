@@ -67,6 +67,8 @@ export type CodemodeModelRuntime = Pick<
 export interface CodemodeToolOptions {
 	/** Namespace of a tool, for `searchTools()` ranking and its `namespace` filter. */
 	getToolNamespace?: (toolName: string) => ToolNamespace | undefined;
+	/** Prompt guidelines by tool name, included in script-visible tool samples. */
+	getToolGuidelines?: () => ReadonlyMap<string, readonly string[]>;
 	/**
 	 * Expose the `models` namespace to scripts, backed by the session's model registry
 	 * (`ctx.modelRegistry`). Without it, `models` is not declared.
@@ -167,11 +169,15 @@ export const DEFAULT_CODEMODE_INLINE_BUDGET = 3000;
 /** Characters per token when estimating the cost of a tool section. */
 const CHARS_PER_TOKEN = 4;
 
-/** What a script sees of a tool. Tools without an output schema resolve to their text output. */
-export function toCodemodeDeclaration(tool: AgentTool<any>): Omit<CodemodeTool, "execute"> {
+/**
+ * What a script sees of a tool: its description followed by its prompt guidelines, which the system
+ * prompt only has for declared tools. Tools without an output schema resolve to their text output.
+ */
+export function toCodemodeDeclaration(tool: AgentTool<any>, guidelines: readonly string[] = []): Omit<CodemodeTool, "execute"> {
+	const bullets = guidelines.flatMap((guideline) => (guideline.trim() ? [`- ${guideline.trim()}`] : []));
 	return {
 		name: tool.name,
-		description: tool.description,
+		description: bullets.length > 0 ? `${tool.description.trim()}\n\n${bullets.join("\n")}` : tool.description,
 		inputSchema: tool.parameters as CodemodeJsonSchema,
 		outputSchema: (tool.outputSchema as CodemodeJsonSchema | undefined) ?? TEXT_OUTPUT_SCHEMA,
 	};
@@ -187,6 +193,8 @@ export interface CodemodeDescriptionOptions {
 	models?: boolean;
 	/** Namespace of each tool, by tool name. Tools of one namespace are listed under one heading. */
 	namespaces?: ReadonlyMap<string, ToolNamespace>;
+	/** Prompt guidelines by tool name, included in listed declarations. */
+	guidelines?: ReadonlyMap<string, readonly string[]>;
 	/** Tools that are callable but never listed with their declaration (`deferred` exposure). */
 	deferred?: ReadonlySet<string>;
 	/**
@@ -252,7 +260,7 @@ export function createCodemodeDescription(
 ): string {
 	const declarations = getCodemodeCallableTools(tools)
 		.filter((tool) => !options.deferred?.has(tool.name))
-		.map(toCodemodeDeclaration);
+		.map((tool) => toCodemodeDeclaration(tool, options.guidelines?.get(tool.name)));
 	const groups = new Map<string, CatalogGroup>([["", { namespace: undefined, entries: [] }]]);
 	for (const declaration of declarations) {
 		const namespace = options.namespaces?.get(declaration.name);
@@ -335,6 +343,8 @@ function describeScriptCall(tool: AgentTool<any>): string {
  * - `only`: the codemode description lists every callable tool, and requests leave out the
  *   declarations of active `direct` tools.
  *
+ * Listed tools carry their prompt guidelines, which the system prompt only has for declared tools.
+ *
  * Listing by exposure, not by the active set, keeps the codemode description unchanged when
  * `tool_search` loads a tool, so loads do not redeclare codemode.
  */
@@ -356,9 +366,11 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
 			return namespace ? [[tool.name, namespace] as const] : [];
 		}),
 	);
+	const guidelines = new Map(listed.map((tool) => [tool.name, loadout.getPromptGuidelines(tool.name)]));
 	descriptions[CODEMODE_TOOL_NAME] = createCodemodeDescription(listed, {
 		models: options.models === true,
 		namespaces,
+		guidelines,
 		deferred: new Set(
 			listed.filter((tool) => loadout.getExposure(tool.name) === "deferred").map((tool) => tool.name),
 		),
